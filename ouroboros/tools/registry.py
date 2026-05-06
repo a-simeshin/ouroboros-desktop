@@ -7,7 +7,6 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import pathlib
@@ -344,6 +343,32 @@ class ToolRegistry:
         self._entries: Dict[str, ToolEntry] = {}
         self._ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
         self._load_modules()
+        self._apply_whitelist()
+
+    def _apply_whitelist(self) -> None:
+        """Filter loaded tools by ``OUROBOROS_TOOLS_ENABLED`` env var.
+
+        Empty / unset env -> no-op (current behaviour, all autodiscovered
+        tools available). Non-empty -> keep only listed tools plus the
+        protected core surface (``CORE_TOOL_NAMES`` and the discovery
+        helpers ``list_available_tools`` / ``enable_tools``).
+        """
+        raw_whitelist = os.environ.get("OUROBOROS_TOOLS_ENABLED", "")
+        whitelist = [s.strip() for s in raw_whitelist.split(",") if s.strip()]
+        if not whitelist:
+            return
+        protected = set(CORE_TOOL_NAMES) | {"list_available_tools", "enable_tools"}
+        keep = set(whitelist) | protected
+        total_before = len(self._entries)
+        self._entries = {
+            name: entry for name, entry in self._entries.items() if name in keep
+        }
+        logging.getLogger(__name__).info(
+            "[Registry] Whitelist active: %d of %d tools enabled (whitelist=%s)",
+            len(self._entries),
+            total_before,
+            sorted(whitelist),
+        )
 
     _FROZEN_TOOL_MODULES = [
         "a2a", "browser", "ci", "claude_advisory_review", "compact_context", "control",
@@ -365,6 +390,7 @@ class ToolRegistry:
             module_names = self._FROZEN_TOOL_MODULES
         else:
             import pkgutil
+
             import ouroboros.tools as tools_pkg
             module_names = [
                 m for _, m, _ in pkgutil.iter_modules(tools_pkg.__path__)
@@ -401,8 +427,12 @@ class ToolRegistry:
         # entries instead of leaving them manually dispatch-only.
         try:
             from ouroboros.extension_loader import (
-                _tools as _ext_tools,
                 _lock as _ext_lock,
+            )
+            from ouroboros.extension_loader import (
+                _tools as _ext_tools,
+            )
+            from ouroboros.extension_loader import (
                 is_extension_live as _ext_is_live,
             )
             with _ext_lock:
@@ -441,8 +471,12 @@ class ToolRegistry:
                 result.append({"name": e.name, "description": desc})
         try:
             from ouroboros.extension_loader import (
-                _tools as _ext_tools,
                 _lock as _ext_lock,
+            )
+            from ouroboros.extension_loader import (
+                _tools as _ext_tools,
+            )
+            from ouroboros.extension_loader import (
                 is_extension_live as _ext_is_live,
             )
             with _ext_lock:
@@ -471,7 +505,8 @@ class ToolRegistry:
             _ext_parse_name = None
         if _ext_parse_name and _ext_parse_name(name):
             try:
-                from ouroboros.extension_loader import get_tool as _ext_get_tool, is_extension_live as _ext_is_live
+                from ouroboros.extension_loader import get_tool as _ext_get_tool
+                from ouroboros.extension_loader import is_extension_live as _ext_is_live
                 ext_tool = _ext_get_tool(name)
             except Exception:
                 ext_tool = None
@@ -524,6 +559,8 @@ class ToolRegistry:
         try:
             from ouroboros.extension_loader import (
                 is_extension_live as _ext_is_live,
+            )
+            from ouroboros.extension_loader import (
                 unload_extension as _ext_unload,
             )
         except Exception:

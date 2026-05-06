@@ -152,6 +152,17 @@ class LocalChatBridge:
             return []
 
     def configure_from_settings(self, settings: Dict[str, Any]) -> None:
+        # WEBUI_ONLY gate: when set, the Telegram bridge must not start.
+        # Stop any existing polling thread and skip token wiring entirely so
+        # the desktop/k8s headless deployment never reaches Telegram servers.
+        if bool(settings.get("WEBUI_ONLY")):
+            log.info("[WEBUI_ONLY] Telegram bridge disabled by config")
+            self._stop_telegram_polling()
+            self._telegram_bot_token = ""
+            self._telegram_chat_id = 0
+            self._telegram_active_chat_id = 0
+            return
+
         token = str(settings.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
         chat_id = self._parse_single_chat_id(
             str(settings.get("TELEGRAM_CHAT_ID", "") or "").strip(),

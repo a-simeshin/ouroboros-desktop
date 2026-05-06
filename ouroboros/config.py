@@ -114,6 +114,17 @@ SETTINGS_DEFAULTS = {
     "A2A_AGENT_DESCRIPTION": "",
     "A2A_MAX_CONCURRENT": 3,
     "A2A_TASK_TTL_HOURS": 24,
+    # K8s deployment readiness — Phase 1 scaffolding (see specs/k8s-deployment-readiness.md)
+    # WEBUI_ONLY: when True, hides Telegram UI and prevents TelegramBridge startup.
+    "WEBUI_ONLY": False,
+    # Generic git remote auto-sync (any HTTPS git server: GitHub, GitLab, Gitea, Bitbucket, ...).
+    # When OUROBOROS_GIT_REMOTE_URL is set it takes precedence over GITHUB_TOKEN+GITHUB_REPO.
+    "OUROBOROS_GIT_REMOTE_URL": "",
+    "OUROBOROS_GIT_USERNAME": "",
+    "OUROBOROS_GIT_PASSWORD": "",
+    # Tools whitelist (comma-separated). Empty = all auto-discovered tools (current behavior).
+    # When set, only listed tools (plus protected core tools) are exposed by ToolRegistry.
+    "OUROBOROS_TOOLS_ENABLED": "",
 }
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
@@ -773,6 +784,13 @@ def apply_settings_to_env(settings: dict) -> None:
         "A2A_ENABLED", "A2A_PORT", "A2A_HOST",
         "A2A_AGENT_NAME", "A2A_AGENT_DESCRIPTION",
         "A2A_MAX_CONCURRENT", "A2A_TASK_TTL_HOURS",
+        # K8s deployment readiness — Phase 1 scaffolding
+        # WEBUI_ONLY: hides Telegram UI / blocks bridge startup when True.
+        "WEBUI_ONLY",
+        # Generic git remote (any HTTPS server) — propagated for subprocess git calls.
+        "OUROBOROS_GIT_REMOTE_URL", "OUROBOROS_GIT_USERNAME", "OUROBOROS_GIT_PASSWORD",
+        # Tools whitelist (comma-separated). Empty = all auto-discovered tools.
+        "OUROBOROS_TOOLS_ENABLED",
     ]
     for k in env_keys:
         val = settings.get(k)

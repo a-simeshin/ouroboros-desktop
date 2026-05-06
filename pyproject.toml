@@ -58,6 +58,7 @@ a2a = ["a2a-sdk[http-server]>=0.3.20"]
 browser = ["playwright", "playwright-stealth"]
 local-model = ["llama-cpp-python"]
 build = ["pyinstaller>=6.0"]
+test = ["testcontainers>=4.0", "pytest-mock>=3.10", "requests"]
 all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20", "playwright", "playwright-stealth", "llama-cpp-python", "huggingface_hub"]
 
 [tool.pytest.ini_options]
@@ -67,9 +68,10 @@ python_functions = ["test_*"]
 # Default local runs exclude the `integration` marker so contributors do not
 # accidentally burn provider tokens on every `pytest`. CI Tier 2.5 opts in
 # explicitly with `pytest -m integration` (the CLI -m overrides addopts -m).
-addopts = "-q --tb=short -m 'not integration'"
+addopts = "-q --tb=short -m 'not integration and not docker'"
 markers = [
     "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
+    "docker: requires Docker daemon (Testcontainers integration tests)",
 ]
 
 [tool.setuptools]

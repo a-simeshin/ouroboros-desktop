@@ -112,3 +112,49 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     yield  # fixture finalizers and teardown run here
     teardown_loop.close()
     asyncio.set_event_loop(None)
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_mock_named_files_in_cwd():
+    """Catch tests that pass a bare MagicMock as a filesystem path.
+
+    When a test hands a ``MagicMock()`` to code that calls
+    ``ctx.drive_logs() / "events.jsonl"`` and then ``open(path, ...)``,
+    Python coerces the mock to its repr (``<MagicMock name='...' id=...>``)
+    and creates a real file in the current working directory with that
+    name. The production caller wraps the write in ``try/except``, so the
+    leak is silent — but the file persists and pollutes the repo.
+
+    This fixture takes a snapshot of cwd before the test and fails the
+    test (and cleans up) if any ``*MagicMock*`` filename appeared during
+    the call. The check is scoped to the current process cwd to avoid
+    walking the whole tree on every test.
+    """
+    import pathlib
+
+    cwd = pathlib.Path.cwd()
+
+    def _mock_named_entries() -> set:
+        try:
+            return {p.name for p in cwd.iterdir() if "MagicMock" in p.name}
+        except OSError:
+            return set()
+
+    before = _mock_named_entries()
+    yield
+    after = _mock_named_entries()
+    leaked = sorted(after - before)
+    if leaked:
+        for name in leaked:
+            try:
+                (cwd / name).unlink()
+            except OSError:
+                pass
+        pytest.fail(
+            "Test leaked MagicMock-named files into cwd "
+            f"({len(leaked)} entries, e.g. {leaked[0]!r}). "
+            "Likely cause: a MagicMock was passed where a pathlib.Path was "
+            "expected (e.g. unset ctx.drive_logs.return_value). Set the "
+            "return_value to a real tmp_path before the call.",
+            pytrace=False,
+        )

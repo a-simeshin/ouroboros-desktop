@@ -181,13 +181,30 @@ def _bootstrap_local_presets() -> dict:
     return out
 
 
+def _wizard_step_order(settings: dict) -> list:
+    """Return the active wizard step order honouring the WEBUI_ONLY toggle.
+
+    The current wizard does not ship a dedicated ``telegram`` step, but the
+    contract is documented here so a future Telegram onboarding page is
+    skipped automatically when ``WEBUI_ONLY`` is true. Filtering here means
+    the toggle never silently breaks: the moment a step named ``telegram``
+    (or ``telegram_*``) is added to ``_STEP_ORDER`` it gets dropped from the
+    bootstrap payload sent to the JS wizard, and the headless deployment
+    never renders Telegram setup.
+    """
+    steps = list(_STEP_ORDER)
+    if bool(settings.get("WEBUI_ONLY")):
+        steps = [s for s in steps if not str(s).lower().startswith("telegram")]
+    return steps
+
+
 def _build_bootstrap(settings: dict, host_mode: str) -> dict:
     provider_profile = _derive_provider_profile(settings)
     models = _initial_models(settings, provider_profile)
     return {
         "hostMode": host_mode,
         "supportsLocalRuntimeControls": host_mode == "web",
-        "stepOrder": list(_STEP_ORDER),
+        "stepOrder": _wizard_step_order(settings),
         "modelDefaults": {
             "openrouter": dict(_OPENROUTER_MODEL_DEFAULTS),
             "openai": dict(_OPENAI_MODEL_DEFAULTS),

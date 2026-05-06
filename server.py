@@ -9,12 +9,10 @@ Starlette + uvicorn on configurable host:port (default localhost:8765; non-loopb
 """
 
 import asyncio
-import collections
+import inspect
 import json
 import logging
-
 import os
-import inspect
 import pathlib
 import socket
 import sys
@@ -24,28 +22,29 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Route, Mount, WebSocketRoute
+from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
-
-import uvicorn
 
 from ouroboros import get_version
 from ouroboros.file_browser_api import file_browser_routes
 from ouroboros.model_catalog_api import api_model_catalog
-from ouroboros.server_control import (
-    execute_panic_stop as _execute_panic_stop_impl,
-    restart_current_process as _restart_current_process_impl,
-)
-from ouroboros.server_history_api import make_chat_history_endpoint, make_cost_breakdown_endpoint
 from ouroboros.server_auth import (
     NetworkAuthGate,
     get_network_auth_startup_warning,
     validate_network_auth_configuration,
 )
+from ouroboros.server_control import (
+    execute_panic_stop as _execute_panic_stop_impl,
+)
+from ouroboros.server_control import (
+    restart_current_process as _restart_current_process_impl,
+)
 from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
+from ouroboros.server_history_api import make_chat_history_endpoint, make_cost_breakdown_endpoint
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
 
 # ---------------------------------------------------------------------------
@@ -66,7 +65,8 @@ sys.path.insert(0, str(REPO_DIR))
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _log_dir = DATA_DIR / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler  # noqa: E402
+
 _file_handler = RotatingFileHandler(
     _log_dir / "server.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
 )
@@ -117,7 +117,7 @@ def _is_wildcard_host(host: str) -> bool:
     return host in _WILDCARD_HOSTS
 
 
-from ouroboros.platform_layer import is_container_env
+from ouroboros.platform_layer import is_container_env  # noqa: E402
 
 
 def _build_network_meta(bind_host: str, bind_port: int) -> dict:
@@ -355,11 +355,18 @@ def _claude_code_status_payload() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Settings (single source of truth: ouroboros.config)
 # ---------------------------------------------------------------------------
-from ouroboros.config import (
+from ouroboros.config import (  # noqa: E402
     SETTINGS_DEFAULTS as _SETTINGS_DEFAULTS,
-    load_settings, save_settings, apply_settings_to_env as _apply_settings_to_env,
 )
-from ouroboros.server_runtime import (
+from ouroboros.config import (  # noqa: E402
+    apply_settings_to_env as _apply_settings_to_env,
+)
+from ouroboros.config import (  # noqa: E402
+    load_settings,
+    save_settings,
+)
+from ouroboros.onboarding_wizard import build_onboarding_html  # noqa: E402
+from ouroboros.server_runtime import (  # noqa: E402
     apply_runtime_provider_defaults,
     classify_runtime_provider_change,
     has_local_routing,
@@ -368,8 +375,6 @@ from ouroboros.server_runtime import (
     setup_remote_if_configured,
     ws_heartbeat_loop,
 )
-from ouroboros.onboarding_wizard import build_onboarding_html
-
 
 # ---------------------------------------------------------------------------
 # Supervisor integration
@@ -402,7 +407,7 @@ def _describe_bg_consciousness_state(requested_enabled: bool) -> dict:
     elif requested_enabled and running:
         status = "running"
         detail = (
-            f"Background consciousness is idle between wakeups."
+            "Background consciousness is idle between wakeups."
             + (f" Next wakeup in {next_wakeup_sec}s." if next_wakeup_sec > 0 else "")
         )
     elif requested_enabled:
@@ -455,6 +460,20 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         sender_session_id = str(msg.get("sender_session_id") or "")
         client_message_id = str(msg.get("client_message_id") or "")
         telegram_chat_id = int(msg.get("telegram_chat_id") or 0)
+        # WEBUI_ONLY gate: incoming messages with a Telegram chat_id must be
+        # treated as Web traffic. Re-read settings each iteration so a runtime
+        # toggle takes effect without restarting the process.
+        if telegram_chat_id != 0:
+            try:
+                _webui_only = bool(load_settings().get("WEBUI_ONLY"))
+            except Exception:
+                _webui_only = False
+            if _webui_only:
+                log.warning(
+                    "[WEBUI_ONLY] Ignoring telegram_chat_id=%d from incoming message",
+                    telegram_chat_id,
+                )
+                telegram_chat_id = 0
         image_base64 = str(msg.get("image_base64") or "")
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
@@ -576,8 +595,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 bg_status = "running" if ctx.consciousness.is_running else "stopped"
                 ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
         elif lowered.startswith("/status"):
+            from supervisor.queue import HARD_TIMEOUT_SEC, SOFT_TIMEOUT_SEC
             from supervisor.state import status_text
-            from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
 
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
             ctx.send_with_budget(chat_id, status, force_budget=True)
@@ -633,6 +652,13 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
     git_ops_module.ensure_repo_present()
     setup_remote_if_configured(settings, log)
 
+    try:
+        from ouroboros.git_sync import bootstrap_remote_sync
+        _bs_status, _bs_reason = bootstrap_remote_sync(settings)
+        log.info("[git_sync] bootstrap: %s — %s", _bs_status, _bs_reason)
+    except Exception as _bs_exc:
+        log.warning("[git_sync] bootstrap_remote_sync raised: %s", _bs_exc)
+
     if _LAUNCHER_MANAGED:
         return git_ops_module.safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
 
@@ -654,8 +680,8 @@ def _run_supervisor(settings: dict) -> None:
     _apply_settings_to_env(settings)
 
     try:
-        from supervisor.message_bus import init as bus_init
         from supervisor.message_bus import LocalChatBridge
+        from supervisor.message_bus import init as bus_init
 
         bridge = LocalChatBridge(settings)
         bridge._broadcast_fn = broadcast_ws_sync
@@ -670,8 +696,15 @@ def _run_supervisor(settings: dict) -> None:
             chat_bridge=bridge,
         )
 
-        from supervisor.state import init as state_init, init_state, load_state, save_state
-        from supervisor.state import append_jsonl, update_budget_from_usage, rotate_chat_log_if_needed
+        from supervisor.state import (
+            append_jsonl,
+            init_state,
+            load_state,
+            rotate_chat_log_if_needed,
+            save_state,
+            update_budget_from_usage,
+        )
+        from supervisor.state import init as state_init
         state_init(DATA_DIR, float(settings.get("TOTAL_BUDGET", 10.0)))
         init_state()
 
@@ -681,14 +714,30 @@ def _run_supervisor(settings: dict) -> None:
             log.error("Supervisor bootstrap failed: %s", msg)
 
         from supervisor.queue import (
-            enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
-            persist_queue_snapshot, restore_pending_from_snapshot,
-            cancel_task_by_id, queue_deep_self_review_task, sort_pending,
+            cancel_task_by_id,
+            enforce_task_timeouts,
+            enqueue_evolution_task_if_needed,
+            enqueue_task,
+            persist_queue_snapshot,
+            queue_deep_self_review_task,
+            restore_pending_from_snapshot,
+            sort_pending,
         )
         from supervisor.workers import (
-            init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
-            spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-            handle_chat_direct, _get_chat_agent, auto_resume_after_restart,
+            PENDING,
+            RUNNING,
+            WORKERS,
+            _get_chat_agent,
+            assign_tasks,
+            auto_resume_after_restart,
+            ensure_workers_healthy,
+            get_event_q,
+            handle_chat_direct,
+            kill_workers,
+            spawn_workers,
+        )
+        from supervisor.workers import (
+            init as workers_init,
         )
 
         max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 5))
@@ -709,11 +758,12 @@ def _run_supervisor(settings: dict) -> None:
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
+        import queue as _queue_mod
+        import types
+
+        from ouroboros.consciousness import BackgroundConsciousness
         from supervisor.events import dispatch_event
         from supervisor.message_bus import send_with_budget
-        from ouroboros.consciousness import BackgroundConsciousness
-        import types
-        import queue as _queue_mod
 
         kill_workers()
         spawn_workers(max_workers)
@@ -891,7 +941,11 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     from ouroboros.config import get_skills_repo_path, load_settings
                     from ouroboros.extension_loader import (
                         extension_name_prefix as _extension_name_prefix,
+                    )
+                    from ouroboros.extension_loader import (
                         list_ws_handlers as _ws_handlers,
+                    )
+                    from ouroboros.extension_loader import (
                         reconcile_extension as _reconcile_extension,
                     )
                     from ouroboros.skill_loader import discover_skills as _discover_skills
@@ -1016,10 +1070,10 @@ async def api_health(request: Request) -> JSONResponse:
 
 async def api_state(request: Request) -> JSONResponse:
     try:
-        from supervisor.state import load_state, budget_remaining, budget_pct, TOTAL_BUDGET_LIMIT
-        from supervisor.workers import WORKERS, PENDING, RUNNING
-        from supervisor.queue import get_evolution_status_snapshot
         from ouroboros.config import get_runtime_mode, get_skills_repo_path
+        from supervisor.queue import get_evolution_status_snapshot
+        from supervisor.state import TOTAL_BUDGET_LIMIT, load_state
+        from supervisor.workers import PENDING, RUNNING, WORKERS
         st = load_state()
         alive = 0
         total_w = 0
@@ -1334,7 +1388,7 @@ async def api_command(request: Request) -> JSONResponse:
 async def api_git_log(request: Request) -> JSONResponse:
     """Return recent commits, tags, and current branch/sha."""
     try:
-        from supervisor.git_ops import list_commits, list_versions, git_capture
+        from supervisor.git_ops import git_capture, list_commits, list_versions
         commits = list_commits(max_count=30)
         tags = list_versions(max_count=20)
         rc, branch, _ = git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
@@ -1384,8 +1438,9 @@ _evo_task: Optional[asyncio.Task] = None
 
 async def api_evolution_data(request: Request) -> JSONResponse:
     """Collect evolution metrics for each git tag."""
-    from ouroboros.utils import collect_evolution_metrics
     import time as _t
+
+    from ouroboros.utils import collect_evolution_metrics
     global _evo_task
 
     now = _t.time()
@@ -1413,13 +1468,14 @@ async def api_evolution_data(request: Request) -> JSONResponse:
     })
 
 
-from ouroboros.local_model_api import (
-    api_local_model_start, api_local_model_stop,
-    api_local_model_status, api_local_model_test,
+from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete  # noqa: E402
+from ouroboros.local_model_api import (  # noqa: E402
     api_local_model_install_runtime,
+    api_local_model_start,
+    api_local_model_status,
+    api_local_model_stop,
+    api_local_model_test,
 )
-from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
-
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -1428,23 +1484,23 @@ web_dir = resolve_web_dir(REPO_DIR)
 web_dir.mkdir(parents=True, exist_ok=True)
 index_page = make_index_page(web_dir)
 
-from ouroboros.extensions_api import (
-    api_extensions_index,
-    api_extension_manifest,
+from ouroboros.extensions_api import (  # noqa: E402
     api_extension_dispatch,
-    api_skill_toggle,
-    api_skill_review,
+    api_extension_manifest,
+    api_extensions_index,
     api_skill_grants,
     api_skill_reconcile,
+    api_skill_review,
+    api_skill_toggle,
 )
-from ouroboros.marketplace_api import (
-    api_marketplace_search,
+from ouroboros.marketplace_api import (  # noqa: E402
     api_marketplace_info,
-    api_marketplace_preview,
     api_marketplace_install,
-    api_marketplace_update,
-    api_marketplace_uninstall,
     api_marketplace_installed,
+    api_marketplace_preview,
+    api_marketplace_search,
+    api_marketplace_uninstall,
+    api_marketplace_update,
 )
 
 
@@ -1457,7 +1513,9 @@ from ouroboros.marketplace_api import (
 async def api_migrations_list(request: Request) -> JSONResponse:
     """Return the list of unread upgrade migration records."""
     import json as _json
+
     from starlette.responses import JSONResponse as _JR
+
     from ouroboros.config import DATA_DIR
     target = pathlib.Path(DATA_DIR) / "state" / "migrations.json"
     if not target.is_file():
@@ -1481,7 +1539,9 @@ async def api_migrations_list(request: Request) -> JSONResponse:
 async def api_migrations_dismiss(request: Request) -> JSONResponse:
     """Mark a migration record as dismissed so the banner stops firing."""
     import json as _json
+
     from starlette.responses import JSONResponse as _JR
+
     from ouroboros.config import DATA_DIR
     key = (request.path_params.get("key") or "").strip()
     # Same path-param hygiene as the marketplace surface.
@@ -1625,7 +1685,7 @@ routes = [
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]
 
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress  # noqa: E402
 
 
 @asynccontextmanager
@@ -1680,6 +1740,8 @@ async def lifespan(app):
     try:
         from ouroboros.config import (
             get_skills_repo_path,
+        )
+        from ouroboros.config import (
             load_settings as _load_settings,
         )
         from ouroboros.extension_loader import reload_all as _reload_extensions
@@ -1758,11 +1820,40 @@ async def lifespan(app):
             get_bridge().shutdown()
         except Exception:
             pass
+        # git_sync shutdown push — runs inside the Starlette lifespan
+        # finally block so graceful shutdown still pushes when running
+        # under modern Starlette (which does not honour ``router.on_shutdown``).
+        # The blocking ``shutdown_push_sync`` is bounded by an internal
+        # 25s ``threading.Event.wait`` budget so it never delays exit
+        # beyond the FastAPI/uvicorn termination grace window.
+        try:
+            from ouroboros.config import load_settings as _load_settings_for_git_sync
+            from ouroboros.git_sync import shutdown_push_sync as _git_shutdown_push
+            _settings_for_push = _load_settings_for_git_sync()
+            _push_status, _push_reason = await asyncio.to_thread(
+                _git_shutdown_push, _settings_for_push
+            )
+            log.info("[git_sync] shutdown_push: %s — %s", _push_status, _push_reason)
+        except Exception:
+            log.warning("[git_sync] shutdown_push raised", exc_info=True)
 
 
 app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan))
 app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
+
+# Wire git_sync shutdown push handler. NetworkAuthGate is a thin ASGI
+# wrapper; the inner Starlette app (``app.app``) is what owns lifespan
+# events. ``register_shutdown_handler`` is defensive — it falls back to
+# a warning when running under Starlette 1.x (where lifespan replaced
+# ``on_shutdown``); the real push for that path is invoked from the
+# lifespan ``finally`` block above so graceful shutdown still works.
+try:
+    from ouroboros.git_sync import register_shutdown_handler as _register_git_shutdown
+    _register_git_shutdown(app.app)
+    log.info("[git_sync] registered shutdown push handler on app")
+except Exception as e:
+    log.warning("[git_sync] failed to register shutdown handler: %s", e)
 
 
 def _emergency_process_cleanup() -> None:
@@ -1778,6 +1869,7 @@ def _emergency_process_cleanup() -> None:
     except Exception:
         pass
     import multiprocessing
+
     from ouroboros.platform_layer import force_kill_pid, kill_process_on_port
     for child in multiprocessing.active_children():
         try:

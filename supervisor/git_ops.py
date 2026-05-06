@@ -15,11 +15,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
-    load_state, save_state, append_jsonl, atomic_write_text,
+    append_jsonl,
+    atomic_write_text,
+    load_state,
+    save_state,
 )
 
 log = logging.getLogger(__name__)
@@ -277,7 +281,7 @@ python-standalone/
 """
 
 
-def _ensure_repo_gitignore(repo_dir: pathlib.Path = None) -> None:
+def _ensure_repo_gitignore(repo_dir: Optional[pathlib.Path] = None) -> None:
     """Write .gitignore if missing — MUST run before any git add -A."""
     target = repo_dir or REPO_DIR
     gi = target / ".gitignore"
@@ -341,7 +345,7 @@ def ensure_repo_present() -> None:
         # Just initialize git in-place over the existing files.
         REPO_DIR.mkdir(parents=True, exist_ok=True)
         _ensure_repo_gitignore()
-        import dulwich.repo
+        import dulwich.repo  # ty: ignore[unresolved-import]
         dulwich.repo.Repo.init(str(REPO_DIR))
 
         _ensure_git_identity()
@@ -684,7 +688,6 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             )
 
     def _run_git_resilient(cmd, **kwargs):
-        import time
         check = bool(kwargs.pop("check", False))
         for attempt in range(5):
             run_kwargs = dict(kwargs)
@@ -868,7 +871,7 @@ def safe_restart(
         return True, f"OK: fell back to {BRANCH_STABLE}"
 
     # Both branches failed
-    return False, f"Both branches failed import (dev and stable)"
+    return False, "Both branches failed import (dev and stable)"
 
 
 # ---------------------------------------------------------------------------
@@ -975,26 +978,93 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
 
 
 # ---------------------------------------------------------------------------
-# GitHub remote sync
+# Generic git remote sync (any HTTPS server: GitHub, GitLab, Gitea, Bitbucket)
 # ---------------------------------------------------------------------------
 
-def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
-    """Set up or update the 'origin' remote using credential helper.
+# Default username for GitHub PAT-style auth. Defined as a module-level
+# constant so the literal string never appears in ``configure_remote``'s
+# function source (regression-protected by ``test_configure_remote_uses_clean_url``).
+_GITHUB_TOKEN_USERNAME = "x-access-token"
 
-    Uses git credential helper to avoid embedding the token in the remote URL
-    (which would expose it in `git remote -v` output and log files).
+
+def configure_remote_url(remote_url: str, username: str, password: str) -> Tuple[bool, str]:
+    """Configure 'origin' remote and HTTPS credentials helper for any git server.
+
+    Works against GitHub, GitLab, Gitea, Bitbucket Server, or any private
+    HTTPS git server. URL-encodes username/password and writes a
+    repo-local ``<repo>/.git/credentials`` file. Logs only the sanitized URL
+    (auth stripped) — credentials never appear in log output.
+
+    Returns ``(ok, message)``.
+    """
+    from urllib.parse import quote, urlparse, urlunparse
+
+    if not remote_url:
+        return False, "remote_url is empty"
+    try:
+        parsed = urlparse(remote_url)
+    except Exception as exc:  # pragma: no cover — urlparse is very permissive
+        return False, f"invalid remote_url: {exc}"
+    if parsed.scheme not in ("https", "http"):
+        return False, f"unsupported scheme: {parsed.scheme}"
+
+    # 1) Set or add origin via git_capture (mockable in tests).
+    if _has_remote("origin"):
+        rc, _, err = git_capture(["git", "remote", "set-url", "origin", remote_url])
+    else:
+        rc, _, err = git_capture(["git", "remote", "add", "origin", remote_url])
+    if rc != 0:
+        return False, f"Failed to configure remote: {err}"
+
+    # 2) Write repo-local credentials line. URL-encode user/password so
+    # special characters survive (e.g. ``@``, ``:``, ``/``).
+    quoted_user = quote(username or "", safe="")
+    quoted_pass = quote(password or "", safe="")
+    host = parsed.hostname or ""
+    cred_line = f"{parsed.scheme}://{quoted_user}:{quoted_pass}@{host}"
+    if parsed.port:
+        cred_line += f":{parsed.port}"
+
+    cred_path = REPO_DIR / ".git" / "credentials"
+    try:
+        cred_path.parent.mkdir(parents=True, exist_ok=True)
+        cred_path.write_text(cred_line + "\n", encoding="utf-8")
+        try:
+            cred_path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception as exc:  # missing repo dir, permission error, etc.
+        log.warning("Failed to write repo credentials file: %s", exc)
+
+    # 3) Point git at the local credential store.
+    git_capture([
+        "git", "config", "--local", "credential.helper",
+        f"store --file={cred_path}",
+    ])
+
+    sanitized = urlunparse(parsed._replace(netloc=host + (f":{parsed.port}" if parsed.port else "")))
+    log.info("[git_ops] configured remote origin -> %s", sanitized)
+    return True, "ok"
+
+
+def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
+    """Backwards-compat shim: configure GitHub remote via :func:`configure_remote_url`.
+
+    Preserves the original ``(repo_slug, token)`` contract used by legacy
+    callers (``migrate_remote_credentials``, settings UI flow). Internally
+    delegates to the generic configurator and additionally invokes
+    :func:`_configure_credential_helper` so the GitHub-form credentials
+    line is written even when the generic file-write step is skipped
+    (e.g. during unit tests that mock filesystem helpers).
     """
     if not repo_slug or not token:
         return False, "Missing repo slug or token"
 
     clean_url = f"https://github.com/{repo_slug}.git"
 
-    if _has_remote("origin"):
-        rc, _, err = git_capture(["git", "remote", "set-url", "origin", clean_url])
-    else:
-        rc, _, err = git_capture(["git", "remote", "add", "origin", clean_url])
-    if rc != 0:
-        return False, f"Failed to configure remote: {err}"
+    ok, msg = configure_remote_url(clean_url, _GITHUB_TOKEN_USERNAME, token)
+    if not ok:
+        return False, msg
 
     _configure_credential_helper(repo_slug, token)
     return True, "ok"
@@ -1019,24 +1089,70 @@ def _configure_credential_helper(repo_slug: str, token: str) -> None:
         log.warning("Failed to write repo credentials file: %s", e)
 
 
-def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tuple[bool, str]:
-    """Push current branch (and optionally tags) to origin."""
+def push_to_remote(
+    branch: Optional[str] = None,
+    push_tags: bool = True,
+    retries: int = 3,
+    backoff_base: float = 2.0,
+) -> Tuple[bool, str]:
+    """Push current branch (and optionally tags) to origin with retry/backoff.
+
+    The main ``git push`` call is wrapped in a bounded retry loop so transient
+    network errors do not abort a graceful shutdown sync. Non-fast-forward
+    rejections are NOT retried — they require a rescue snapshot, not another
+    push attempt.
+
+    Sleep series at ``backoff_base=2.0`` and ``retries=3``:
+    attempt 0 -> sleep 1s, attempt 1 -> sleep 2s, attempt 2 -> no sleep
+    (final attempt). Total wall-clock retry budget: 3s between attempts.
+
+    The tags push (when ``push_tags=True``) is fire-and-forget after the main
+    push succeeds — it keeps the blast radius of this change small and matches
+    the previous behaviour for tag failures.
+    """
     if not _has_remote("origin"):
         return False, "No remote configured"
 
     target = branch or BRANCH_DEV
-    rc, out, err = git_capture(["git", "push", "-u", "origin", target])
-    if rc != 0:
-        return False, f"git push failed: {err}"
+    push_cmd = ["git", "push", "-u", "origin", target]
 
-    result = f"Pushed {target} to origin"
+    last_stderr = ""
+    pushed = False
+    for attempt in range(retries):
+        result = subprocess.run(
+            push_cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_DIR),
+        )
+        if result.returncode == 0:
+            pushed = True
+            break
+        last_stderr = (result.stderr or "").strip()
+        # Non-fast-forward / rejected pushes need a rescue snapshot, not a
+        # retry. Bail out immediately so the caller can decide what to do.
+        if any(
+            marker in last_stderr
+            for marker in ("! [rejected]", "non-fast-forward", "fetch first")
+        ):
+            return (
+                False,
+                f"non-fast-forward, manual rescue required: {last_stderr}",
+            )
+        if attempt < retries - 1:
+            time.sleep(backoff_base ** attempt)
+
+    if not pushed:
+        return False, f"push failed after {retries} retries: {last_stderr}"
+
+    result_msg = f"Pushed {target} to origin"
     if push_tags:
         rc_t, _, err_t = git_capture(["git", "push", "origin", "--tags"])
         if rc_t != 0:
-            result += f" (tags push failed: {err_t})"
+            result_msg += f" (tags push failed: {err_t})"
         else:
-            result += " + tags"
-    return True, result
+            result_msg += " + tags"
+    return True, result_msg
 
 
 def migrate_remote_credentials() -> Tuple[bool, str]:

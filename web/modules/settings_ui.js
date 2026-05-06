@@ -338,7 +338,8 @@ export function renderSettingsPage() {
                 </section>
 
                 <section class="settings-panel" data-settings-panel="integrations">
-                    <div class="form-section">
+                    <!-- WEBUI_ONLY: this section is hidden in settings.js when settings.WEBUI_ONLY is true. -->
+                    <div class="form-section" data-webui-only-hide="telegram" id="settings-section-telegram">
                         <h3>Telegram Bridge</h3>
                         <div class="form-row">${secretField({
                             id: 's-telegram-token',

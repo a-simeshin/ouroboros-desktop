@@ -219,8 +219,18 @@ export function initSettings({ state }) {
         applyInputValue('s-cloudru-base-url', s.CLOUDRU_FOUNDATION_MODELS_BASE_URL);
         applyInputValue('s-anthropic', s.ANTHROPIC_API_KEY);
         applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
-        applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
-        applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
+        // WEBUI_ONLY: hide the Telegram section entirely so the user cannot
+        // configure a bridge that the backend refuses to start.
+        const _webuiOnly = Boolean(s.WEBUI_ONLY);
+        const telegramSection = document.getElementById('settings-section-telegram');
+        if (telegramSection) {
+            telegramSection.hidden = _webuiOnly;
+            telegramSection.style.display = _webuiOnly ? 'none' : '';
+        }
+        if (!_webuiOnly) {
+            applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
+            applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
+        }
 
         applyInputValue('s-model', s.OUROBOROS_MODEL);
         applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
@@ -332,6 +342,7 @@ export function initSettings({ state }) {
     }
 
     function collectBody() {
+        const _webuiOnly = Boolean(currentSettings && currentSettings.WEBUI_ONLY);
         const body = {
             OUROBOROS_MODEL: byId('s-model').value,
             OUROBOROS_MODEL_CODE: byId('s-model-code').value,
@@ -378,8 +389,17 @@ export function initSettings({ state }) {
             OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
-            TELEGRAM_CHAT_ID: byId('s-telegram-chat-id').value.trim(),
         };
+
+        // WEBUI_ONLY: do not echo Telegram fields back into the settings DTO
+        // when the bridge is disabled. The DOM inputs may still hold stale
+        // values (or be absent if a future revision drops them entirely).
+        if (!_webuiOnly) {
+            const telegramChatInput = byId('s-telegram-chat-id');
+            if (telegramChatInput) {
+                body.TELEGRAM_CHAT_ID = telegramChatInput.value.trim();
+            }
+        }
 
         collectSecretValue('s-openrouter', body);
         collectSecretValue('s-openai', body);
@@ -387,7 +407,9 @@ export function initSettings({ state }) {
         collectSecretValue('s-cloudru-key', body);
         collectSecretValue('s-anthropic', body);
         collectSecretValue('s-network-password', body);
-        collectSecretValue('s-telegram-token', body);
+        if (!_webuiOnly) {
+            collectSecretValue('s-telegram-token', body);
+        }
         collectSecretValue('s-gh-token', body);
 
         return body;

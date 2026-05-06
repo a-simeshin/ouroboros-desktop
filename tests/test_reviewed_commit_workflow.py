@@ -219,7 +219,7 @@ def test_format_status_hides_succeeded_commit():
 # 4. Block reason classification in review.py
 # ---------------------------------------------------------------------------
 
-def test_block_reason_set_for_quorum_failure():
+def test_block_reason_set_for_quorum_failure(tmp_path):
     """_run_unified_review should set _last_review_block_reason='review_quorum'
     when fewer than 2 reviewers succeed."""
     from ouroboros.tools.review import _run_unified_review
@@ -227,6 +227,7 @@ def test_block_reason_set_for_quorum_failure():
     ctx = MagicMock()
     ctx.repo_dir = "/tmp/fake"
     ctx.drive_root = "/tmp/fake_data"
+    ctx.drive_logs.return_value = tmp_path / "logs"
     ctx._review_iteration_count = 0
     ctx._review_advisory = []
     ctx._review_history = []
