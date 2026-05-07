@@ -180,25 +180,24 @@ def test_platform_layer_exists():
 
 def test_platform_layer_exports_core_symbols():
     """platform_layer.py must export the core cross-platform symbols."""
-    from ouroboros.platform_layer import (
-        IS_WINDOWS,
-        IS_MACOS,
+    from ouroboros.platform_layer import (  # noqa: F401  (import-existence smoke check)
         IS_LINUX,
-        kill_process_tree,
-        terminate_process_tree,
+        IS_MACOS,
+        IS_WINDOWS,
+        create_new_session,
+        file_lock_exclusive,
+        file_lock_exclusive_nb,
+        file_lock_shared,
+        file_unlock,
         force_kill_pid,
+        get_cpu_info,
+        get_system_memory,
         kill_pid_tree,
         kill_process_on_port,
+        kill_process_tree,
         pid_lock_acquire,
         pid_lock_release,
-        file_lock_exclusive,
-        file_lock_shared,
-        file_lock_exclusive_nb,
-        file_unlock,
-        create_new_session,
-        get_system_memory,
-        get_cpu_info,
-        git_install_hint,
+        terminate_process_tree,
     )
     # Smoke check: flags are booleans
     assert isinstance(IS_WINDOWS, bool)

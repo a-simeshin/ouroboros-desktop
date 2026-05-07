@@ -226,11 +226,6 @@ If I receive a `SAFETY_WARNING`, I should treat it as a hint — the command was
 
 ## Immutable Safety Files
 
-These files are still treated as safety-critical, but they are no longer
-re-copied from the app bundle on every restart. Packaged builds now bootstrap a
-managed git checkout once from `repo.bundle` / `repo_bundle_manifest.json`, then
-continue from that launcher-managed repo state on later restarts.
-
 The safety-critical set (matching
 `ouroboros/runtime_mode_policy.py::SAFETY_CRITICAL_PATHS`) is:
 - `BIBLE.md` -- Constitution (protected both constitutionally and by the hardcoded sandbox)
@@ -243,13 +238,11 @@ Advanced mode may modify the evolutionary layer, but it must not directly
 modify the broader protected runtime surface defined in
 `ouroboros/runtime_mode_policy.py`: safety-critical files, frozen contract
 files under `ouroboros/contracts/`, and release/managed-repo invariants such
-as `.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`,
-`ouroboros/launcher_bootstrap.py`, and `supervisor/git_ops.py`.
+as `.github/workflows/ci.yml` and `supervisor/git_ops.py`.
 
 Pro mode may edit those protected paths on disk, but such changes still land only through the normal triad + scope commit review. If you
 break a critical file, the hardcoded sandbox, post-edit revert/non-pro guard,
-normal commit review, and launcher-managed repo recovery path are the defense-in-
-depth layers.
+and normal commit review are the defense-in-depth layers.
 
 ## Versioning (Bible Principle 9 — CRITICAL)
 
@@ -286,7 +279,7 @@ Keep the mental map small. The details live in `ARCHITECTURE.md`.
 ### Repository (`~/Ouroboros/repo/`)
 - `BIBLE.md` — Constitution.
 - `prompts/SYSTEM.md` — this prompt.
-- `server.py`, `launcher.py` — runtime shell, desktop launcher, and server entry.
+- `server.py` — single-process runtime entrypoint (Starlette + uvicorn; supervisor in a background thread).
 - `ouroboros/` — core runtime plus provider/server helpers (`agent.py`, `context.py`, `loop.py`, `llm.py`, `server_runtime.py`, `model_catalog_api.py`, `server_history_api.py`, `tools/`).
 - `supervisor/` — routing, workers, queue, state, git ops, and the local message bus / Telegram bridge.
 - `web/` — SPA assets, settings modules, provider icons, and page-specific CSS.

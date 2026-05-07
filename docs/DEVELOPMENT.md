@@ -267,7 +267,7 @@ All platform-specific code **MUST** go through `ouroboros/platform_layer.py`.
   - Direct `os.kill`, `os.killpg`, `os.setsid`, `os.getpgid` attribute access
   - Direct `signal.SIGKILL`, `signal.SIGTERM` attribute access
   
-  Not scanned by the AST guard: `launcher.py` (immutable outer shell, intentionally excluded) and subprocess flag patterns (`creationflags`, `start_new_session`). For subprocess isolation, use `subprocess_new_group_kwargs()` and `subprocess_hidden_kwargs()` from `platform_layer.py` — enforced by code review and the `cross_platform` checklist item.
+  Not scanned by the AST guard: subprocess flag patterns (`creationflags`, `start_new_session`). For subprocess isolation, use `subprocess_new_group_kwargs()` and `subprocess_hidden_kwargs()` from `platform_layer.py` — enforced by code review and the `cross_platform` checklist item.
 - **Pre-commit review**: checklist item `cross_platform` (#14) catches violations during code review.
 - **CI matrix**: tests run on Ubuntu, Windows, and macOS to catch runtime failures.
 
@@ -522,41 +522,5 @@ jobs:
     P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
 ```
 
-This pattern is enforced by `tests/test_build_scripts.py::TestMacOSSigning::
-test_ci_uses_env_context_for_condition`, which parses every `if:` block in
-`.github/workflows/ci.yml` (including multi-line continuations) and asserts
-no occurrence of `secrets.` ever appears inside one.
-
-### Apple signing & notarization (macOS Build job)
-
-When `BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`, and
-`APPLE_TEAM_ID` are configured as repository secrets, the macOS build job
-imports the Developer ID certificate into a temporary keychain and runs
-`bash build.sh` — `build.sh` then signs the `.app` and the `.dmg` using
-the env-overridable `SIGN_IDENTITY`. Each Apple secret is mapped at the
-build job's `env:` block with a `${{ matrix.os == 'macos-latest' && secrets.X || '' }}`
-guard so the Apple credentials reach the macOS matrix shard only; Linux
-and Windows sibling shards (running `build_linux.sh` / `build_windows.ps1`,
-neither of which needs Apple creds) receive empty strings. When `APPLE_ID` and
-`APPLE_APP_SPECIFIC_PASSWORD` are also present, `build.sh` runs
-`xcrun notarytool submit ... --wait` followed by `xcrun stapler staple` to
-attach the notarization ticket; otherwise the entire notarization block is
-skipped and the DMG ships **signed but not notarized** (users still need
-right-click → **Open** on first launch). The stapler call is wrapped in
-its own guard so a transient stapler failure after a successful notarytool
-submission becomes a soft warning rather than a hard build failure (the
-DMG is genuinely notarized — Gatekeeper just fetches the ticket online on
-first launch instead of from the embedded staple). The `notarytool submit`
-call is wrapped the same way: an Apple-side outage / wrong-credential typo
-prints a `WARNING` and lets the DMG ship signed-but-not-notarized, instead
-of aborting the build under `set -e` and silently dropping the macOS
-artifact from the release. A single `NOTARIZE_OUTCOME` enum (`success` /
-`staple_failed` / `submit_failed` / `unconfigured`) drives the build's
-final summary line so the WARN message and the summary always agree on
-the actual artifact state, plus a defensive `*)` arm so any future enum
-drift is loud. The `Cleanup keychain`
-step runs with `if: always() && matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != ''`
-— `always()` ensures cleanup fires on build failures too, the `matrix.os`
-gate keeps the bash-only `security` invocation off Linux/Windows shards,
-and the env guard skips when no keychain was created (no signing secrets).
-Signing material never persists across runs.
+Enforce this pattern via code review on any new step-level `if:` block: confirm
+the gate references `env.*`, never `secrets.*`.

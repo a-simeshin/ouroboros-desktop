@@ -1151,3 +1151,206 @@ def test_manifest_entry_outside_skill_dir_is_rejected(tmp_path):
     # Hash is non-empty (manifest counts) but does not include
     # /etc/passwd content.
     assert loaded.content_hash
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / 2 migration: skill_loader seeding helpers
+# ---------------------------------------------------------------------------
+#
+# Companion coverage for the helpers migrated from launcher_bootstrap as
+# part of the "remove PyInstaller pipeline" effort. These tests exercise
+# ``ensure_data_skills_seeded`` end-to-end against a tmp data + repo
+# layout so the seeding contract stays pinned independent of the
+# unit-level coverage in ``test_per_skill_version_resync.py``.
+
+
+def _seed_skill_template(name: str, version: str = "0.1.0") -> str:
+    return (
+        "---\n"
+        f"name: {name}\n"
+        "description: Seed fixture skill.\n"
+        f"version: {version}\n"
+        "type: instruction\n"
+        "---\n"
+        f"# {name}\n"
+    )
+
+
+@pytest.fixture
+def seed_layout(tmp_path, monkeypatch):
+    """Build a hermetic ``DATA_DIR``/``REPO_DIR`` pair so the seed
+    helpers can resolve their canonical ``data/skills/`` /
+    ``repo/skills/`` paths without touching the developer's home
+    directory.
+
+    Yields ``(data_dir, repo_dir, seed_dir)`` where ``seed_dir`` is the
+    empty ``repo/skills/`` directory the test populates with seed
+    fixtures.
+    """
+    data_dir = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    data_dir.mkdir()
+    repo_dir.mkdir()
+    seed_dir = repo_dir / "skills"
+    seed_dir.mkdir()
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", data_dir, raising=True)
+    monkeypatch.setattr("ouroboros.config.REPO_DIR", repo_dir, raising=True)
+    return data_dir, repo_dir, seed_dir
+
+
+def test_ensure_data_skills_seeded_creates_seed_dir(seed_layout):
+    """First-time bootstrap copies the seed skill into ``data/skills/native/``
+    AND drops the durable ``.bootstrap-seed-complete`` marker."""
+    from ouroboros.skill_loader import (
+        _SEED_COMPLETE_MARKER,
+        ensure_data_skills_seeded,
+    )
+
+    data_dir, _repo_dir, seed_dir = seed_layout
+    seed_skill = seed_dir / "weather"
+    seed_skill.mkdir()
+    (seed_skill / "SKILL.md").write_text(
+        _seed_skill_template("weather"), encoding="utf-8"
+    )
+
+    copied = ensure_data_skills_seeded()
+    assert copied == 1
+    native_root = data_dir / "skills" / "native"
+    assert native_root.is_dir()
+    assert (native_root / "weather" / "SKILL.md").is_file()
+    assert (native_root / _SEED_COMPLETE_MARKER).is_file()
+
+
+def test_ensure_data_skills_seeded_skips_when_marker_present(seed_layout, mocker):
+    """If the marker already exists, the bootstrap pass must short-circuit
+    without copying — even if seed content has been added since."""
+    from ouroboros.skill_loader import (
+        _SEED_COMPLETE_MARKER,
+        ensure_data_skills_seeded,
+    )
+
+    data_dir, _repo_dir, seed_dir = seed_layout
+    seed_skill = seed_dir / "weather"
+    seed_skill.mkdir()
+    (seed_skill / "SKILL.md").write_text(
+        _seed_skill_template("weather"), encoding="utf-8"
+    )
+    # Pre-create the marker so the bootstrap pass treats this as "already done".
+    native_root = data_dir / "skills" / "native"
+    native_root.mkdir(parents=True)
+    marker = native_root / _SEED_COMPLETE_MARKER
+    marker.write_text("pre-existing\n", encoding="utf-8")
+
+    copied = ensure_data_skills_seeded()
+    assert copied == 0
+    # No skill copied — bootstrap respected the marker.
+    assert not (native_root / "weather").exists()
+    # Marker content was not rewritten.
+    assert marker.read_text(encoding="utf-8") == "pre-existing\n"
+
+
+def test_per_skill_version_resync_upgrades_outdated(seed_layout):
+    """Seed-side version bump replaces the data-plane copy in place
+    (delegates to ``_per_skill_version_resync`` via ``ensure_data_skills_seeded``)."""
+    from ouroboros.skill_loader import (
+        _SEED_COMPLETE_MARKER,
+        ensure_data_skills_seeded,
+    )
+
+    data_dir, _repo_dir, seed_dir = seed_layout
+    # Seed ships v0.2.0.
+    seed_skill = seed_dir / "weather"
+    seed_skill.mkdir()
+    (seed_skill / "SKILL.md").write_text(
+        _seed_skill_template("weather", version="0.2.0"), encoding="utf-8"
+    )
+    # Data plane already has v0.1.0 with a .seed-origin marker.
+    native_root = data_dir / "skills" / "native"
+    native_root.mkdir(parents=True)
+    installed = native_root / "weather"
+    installed.mkdir()
+    (installed / "SKILL.md").write_text(
+        _seed_skill_template("weather", version="0.1.0"), encoding="utf-8"
+    )
+    (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
+    # Marker present so bootstrap pass is a noop and resync is the
+    # only thing that fires.
+    (native_root / _SEED_COMPLETE_MARKER).write_text(
+        "Bootstrap-seed completed; copied 0 skill(s).\n", encoding="utf-8"
+    )
+
+    total = ensure_data_skills_seeded()
+    # Resync upgraded one skill.
+    assert total == 1
+    text = (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 0.2.0" in text
+    assert "version: 0.1.0" not in text
+
+
+def test_read_skill_manifest_version_handles_missing_file(tmp_path):
+    """When the skill dir has no ``SKILL.md`` or ``skill.json`` at all,
+    the helper returns the empty string (treated as "do not upgrade")."""
+    from ouroboros.skill_loader import _read_skill_manifest_version
+
+    skill_dir = tmp_path / "no_manifest"
+    skill_dir.mkdir()
+    assert _read_skill_manifest_version(skill_dir) == ""
+
+
+def test_seed_skills_into_copies_native_skills(tmp_path):
+    """Direct unit test for ``_seed_skills_into``: two seed packages
+    must both land under ``target_root/native/`` with their
+    ``.seed-origin`` markers on a fresh data plane."""
+    import logging
+
+    from ouroboros.skill_loader import _SEED_COMPLETE_MARKER, _seed_skills_into
+
+    seed_dir = tmp_path / "repo_skills"
+    seed_dir.mkdir()
+    for name in ("alpha", "beta"):
+        skill = seed_dir / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            _seed_skill_template(name), encoding="utf-8"
+        )
+
+    target_root = tmp_path / "data" / "skills"
+    log_obj = logging.getLogger("ouroboros.tests.seed_skills_into")
+    copied = _seed_skills_into(seed_dir, target_root, log_obj)
+    assert copied == 2
+    native_root = target_root / "native"
+    assert (native_root / "alpha" / "SKILL.md").is_file()
+    assert (native_root / "beta" / "SKILL.md").is_file()
+    assert (native_root / "alpha" / ".seed-origin").is_file()
+    assert (native_root / "beta" / ".seed-origin").is_file()
+    assert (native_root / _SEED_COMPLETE_MARKER).is_file()
+
+
+def test_cleanup_orphaned_seed_markers_removes_stale(tmp_path):
+    """A skill present in ``data/skills/native/`` whose seed has been
+    removed from ``repo/skills/`` must have its ``.seed-origin`` marker
+    stripped (re-classifies the install as user-managed). Payload
+    files stay put — this is purely a marker rewrite."""
+    import logging
+
+    from ouroboros.skill_loader import cleanup_orphaned_seed_markers
+
+    seed_dir = tmp_path / "repo_skills"
+    seed_dir.mkdir()
+    # NOTE: seed_dir intentionally has no ``video_gen`` subdir — that's
+    # the v5.7.0 scenario (seed retired but install still present).
+    native_root = tmp_path / "data" / "skills" / "native"
+    native_root.mkdir(parents=True)
+    orphan = native_root / "video_gen"
+    orphan.mkdir()
+    (orphan / "SKILL.md").write_text(
+        _seed_skill_template("video_gen"), encoding="utf-8"
+    )
+    marker = orphan / ".seed-origin"
+    marker.write_text("seeded_from=test\n", encoding="utf-8")
+
+    log_obj = logging.getLogger("ouroboros.tests.cleanup_orphans")
+    cleanup_orphaned_seed_markers(seed_dir, native_root, log_obj)
+    # Marker stripped, payload files untouched.
+    assert not marker.exists()
+    assert (orphan / "SKILL.md").is_file()

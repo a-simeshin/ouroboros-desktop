@@ -32,14 +32,14 @@ There are three skill types:
 
 The **runtime ownership** of an installed skill is also tagged:
 
-- `native`: bundled with the launcher (e.g. `weather`).
+- `native`: seeded by `ouroboros.skill_loader.ensure_data_skills_seeded` from `repo/skills/` on first run (e.g. `weather`).
 - `external`: dropped into `data/skills/external/` by the user.
 - `clawhub`: installed via the ClawHub marketplace.
 - `ouroboroshub`: installed via the official OuroborosHub catalog.
 
 User-authored or manually copied skills belong under
 `data/skills/external/<name>/`. The `native` bucket is reserved for
-launcher-seeded skills that carry a `.seed-origin` marker. If a user
+seed-loader-written skills that carry a `.seed-origin` marker. If a user
 payload is accidentally left under `native/`, Ouroboros migrates it to
 `external/` so the Repair workflow can edit and re-review it.
 
@@ -193,8 +193,9 @@ Some settings keys are protected: `OPENROUTER_API_KEY`,
 `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `TELEGRAM_BOT_TOKEN`,
 `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
 forwarded to a skill by default, even when listed in
-`env_from_settings`. The desktop launcher's owner-grant bridge
-captures explicit, content-hash-bound consent before forwarding.
+`env_from_settings`. The owner-grant flow (recorded in
+`data/state/skills/<name>/grants.json`) captures explicit,
+content-hash-bound consent before forwarding.
 
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are
@@ -358,7 +359,7 @@ the OuroborosHub catalog:
   `read_settings` for `OPENROUTER_API_KEY`.
 
 You can read their full source under
-`data/skills/native/<name>/` for launcher-seeded examples, under
+`data/skills/native/<name>/` for seeded examples, under
 `data/skills/external/<name>/` for your own local skills, or by browsing
 `joi-lab/OuroborosHub` on GitHub.
 

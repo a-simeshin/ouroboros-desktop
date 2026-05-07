@@ -18,7 +18,6 @@ import textwrap
 
 import pytest
 
-
 SKILL_TEMPLATE = textwrap.dedent(
     """
     ---
@@ -68,7 +67,7 @@ def test_bootstrap_copies_seed_once(isolated_data, monkeypatch):
     seed_dir.mkdir()
     _write_skill(seed_dir, "weather")
 
-    from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
+    from ouroboros.skill_loader import ensure_data_skills_seeded
 
     copied = ensure_data_skills_seeded()
     assert copied == 1
@@ -91,7 +90,7 @@ def test_bootstrap_skips_when_target_already_populated(isolated_data):
     target_native.mkdir(parents=True)
     _write_skill(target_native, "user-skill")  # user-managed; bootstrap must not clobber
 
-    from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
+    from ouroboros.skill_loader import ensure_data_skills_seeded
 
     copied = ensure_data_skills_seeded()
     assert copied == 0
@@ -213,9 +212,9 @@ def test_bootstrap_marker_prevents_resurrection_after_user_deletion(
     seed_dir.mkdir()
     _write_skill(seed_dir, "weather")
 
-    from ouroboros.launcher_bootstrap import (
-        ensure_data_skills_seeded,
+    from ouroboros.skill_loader import (
         _SEED_COMPLETE_MARKER,
+        ensure_data_skills_seeded,
     )
 
     copied_first = ensure_data_skills_seeded()

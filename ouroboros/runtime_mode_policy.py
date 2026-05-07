@@ -32,12 +32,7 @@ FROZEN_CONTRACT_PATHS = frozenset({
 
 RELEASE_INVARIANT_PATHS = frozenset({
     ".github/workflows/ci.yml",
-    "Ouroboros.spec",
-    "build.sh",
-    "build_linux.sh",
-    "build_windows.ps1",
-    "scripts/build_repo_bundle.py",
-    "ouroboros/launcher_bootstrap.py",
+    "Dockerfile",
     "supervisor/git_ops.py",
 })
 

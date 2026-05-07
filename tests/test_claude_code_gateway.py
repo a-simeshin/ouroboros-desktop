@@ -13,12 +13,10 @@ We test:
 
 import asyncio
 import json
-import pathlib
-import subprocess
 import sys
 import types
-import pytest
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Mock SDK so the gateway can be imported on Python 3.9 / without SDK
@@ -48,20 +46,16 @@ async def _async_gen(items):
 
 
 from ouroboros.gateways.claude_code import (  # noqa: E402
+    SAFETY_CRITICAL,
     ClaudeCodeResult,
     make_path_guard,
     make_readonly_guard,
-    SAFETY_CRITICAL,
 )
 
 # Orchestration helpers now live in shell.py
 from ouroboros.tools.shell import (  # noqa: E402
     _load_project_context,
-    _get_changed_files,
-    _get_diff_stat,
-    _run_validation,
 )
-
 
 # ---------------------------------------------------------------------------
 # ClaudeCodeResult
@@ -304,6 +298,7 @@ class TestSDKAPISurface:
 
     def _gateway_source(self):
         import inspect
+
         from ouroboros.gateways import claude_code
         return inspect.getsource(claude_code)
 
@@ -355,7 +350,7 @@ class TestSDKOnlyPath:
     def test_claude_code_edit_returns_error_when_sdk_missing(self, monkeypatch, tmp_path):
         """When SDK ImportError → tool returns install hint, not a crash."""
         from types import SimpleNamespace
-        import ouroboros.tools.shell as shell_mod
+
 
         ctx = SimpleNamespace(
             repo_dir=tmp_path,
@@ -378,10 +373,9 @@ class TestSDKOnlyPath:
             return real_import(name, *args, **kwargs)
 
         # Directly test the error message in the function
-        from ouroboros.tools.shell import _claude_code_edit
-
         # Mock _acquire_git_lock/_release_git_lock so we don't need git
         import ouroboros.tools.git as git_mod
+        from ouroboros.tools.shell import _claude_code_edit
         monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: None)
         monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: None)
         import ouroboros.utils as utils_mod
@@ -407,8 +401,9 @@ class TestSDKOnlyPath:
 
     def test_advisory_returns_error_when_sdk_missing(self, monkeypatch, tmp_path):
         """When SDK not installed → advisory returns install hint."""
-        from ouroboros.tools.claude_advisory_review import _run_claude_advisory
         from types import SimpleNamespace
+
+        from ouroboros.tools.claude_advisory_review import _run_claude_advisory
 
         ctx = SimpleNamespace(
             repo_dir=tmp_path,
@@ -454,6 +449,7 @@ class TestRunReadonlyEffortParam:
     def test_run_readonly_passes_effort_to_options(self):
         """_run_readonly_async should include 'effort' in ClaudeAgentOptions kwargs."""
         import inspect
+
         from ouroboros.gateways import claude_code as gw
 
         source = inspect.getsource(gw._run_readonly_async)
@@ -464,6 +460,7 @@ class TestRunReadonlyEffortParam:
     def test_run_readonly_default_effort_is_high(self):
         """Default effort for run_readonly should be 'high' (matches blocking reviewers)."""
         import inspect
+
         from ouroboros.gateways import claude_code as gw
 
         sig = inspect.signature(gw.run_readonly)
@@ -474,6 +471,7 @@ class TestRunReadonlyEffortParam:
     def test_run_readonly_async_default_effort_is_high(self):
         """Default effort for _run_readonly_async should be 'high'."""
         import inspect
+
         from ouroboros.gateways import claude_code as gw
 
         sig = inspect.signature(gw._run_readonly_async)
@@ -494,7 +492,7 @@ class TestRunReadonlyEffortParam:
                 captured.update(kwargs)
 
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import patch
 
         # Patch ClaudeAgentOptions with one that accepts effort
         with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptions), \
@@ -540,7 +538,6 @@ class TestSDKStatusPayload:
 
     def test_status_payload_reflects_sdk_installed_with_key(self, monkeypatch):
         """When SDK is importable and API key set, status is ready."""
-        import importlib.metadata
         from ouroboros.platform_layer import ClaudeRuntimeState
 
         def mock_resolve():
@@ -689,7 +686,7 @@ class TestClaudeRuntimeResolution:
 
     def test_resolve_claude_runtime_returns_state(self, monkeypatch):
         """resolve_claude_runtime returns a ClaudeRuntimeState regardless of SDK presence."""
-        from ouroboros.platform_layer import resolve_claude_runtime, ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState, resolve_claude_runtime
         state = resolve_claude_runtime()
         assert isinstance(state, ClaudeRuntimeState)
         assert isinstance(state.interpreter_path, str)
@@ -705,6 +702,7 @@ class TestClaudeRuntimeResolution:
         on /api/claude-code/status.
         """
         import importlib.metadata as _md
+
         import ouroboros.platform_layer as pl
 
         def fake_version(pkg: str) -> str:
@@ -730,8 +728,9 @@ class TestClaudeRuntimeResolution:
     def test_resolve_claude_runtime_accepts_at_baseline_sdk(self, monkeypatch):
         """SDK at or above _CLAUDE_SDK_MIN_VERSION passes the version gate."""
         import importlib.metadata as _md
+
         import ouroboros.platform_layer as pl
-        from ouroboros.launcher_bootstrap import _CLAUDE_SDK_MIN_VERSION
+        from ouroboros.claude_runtime import _CLAUDE_SDK_MIN_VERSION
 
         def fake_version(pkg: str) -> str:
             if pkg == "claude-agent-sdk":
@@ -772,7 +771,9 @@ class TestGatewayStderrCapture:
 
     def test_stderr_callback_stores_lines(self):
         from ouroboros.gateways.claude_code import (
-            _stderr_callback, get_last_stderr, clear_stderr_buffer,
+            _stderr_callback,
+            clear_stderr_buffer,
+            get_last_stderr,
         )
         clear_stderr_buffer()
         _stderr_callback("line one")
@@ -810,7 +811,8 @@ class TestVerifyClaudeRuntime:
     def test_verify_passes_when_sdk_present_at_baseline(self, tmp_path, monkeypatch):
         """SDK imports, CLI exists, version meets baseline → no repair."""
         import logging
-        from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
+
+        from ouroboros.claude_runtime import ClaudeRuntimeContext, verify_claude_runtime
 
         calls = []
 
@@ -821,15 +823,9 @@ class TestVerifyClaudeRuntime:
                 return SimpleNamespace(returncode=0, stdout="ok|0.1.60", stderr="")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        ctx = BootstrapContext(
-            bundle_dir=tmp_path,
-            repo_dir=tmp_path,
-            data_dir=tmp_path,
-            settings_path=tmp_path / "settings.json",
+        ctx = ClaudeRuntimeContext(
             embedded_python="/fake/python3",
-            app_version="1.0.0",
             hidden_run=fake_run,
-            save_settings=lambda s: None,
             log=logging.getLogger("test"),
         )
         result = verify_claude_runtime(ctx)
@@ -839,7 +835,8 @@ class TestVerifyClaudeRuntime:
     def test_verify_passes_when_sdk_above_baseline(self, tmp_path):
         """SDK 0.1.61 > baseline 0.1.60 → no repair."""
         import logging
-        from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
+
+        from ouroboros.claude_runtime import ClaudeRuntimeContext, verify_claude_runtime
 
         calls = []
 
@@ -850,15 +847,9 @@ class TestVerifyClaudeRuntime:
                 return SimpleNamespace(returncode=0, stdout="ok|0.1.61", stderr="")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        ctx = BootstrapContext(
-            bundle_dir=tmp_path,
-            repo_dir=tmp_path,
-            data_dir=tmp_path,
-            settings_path=tmp_path / "settings.json",
+        ctx = ClaudeRuntimeContext(
             embedded_python="/fake/python3",
-            app_version="1.0.0",
             hidden_run=fake_run,
-            save_settings=lambda s: None,
             log=logging.getLogger("test"),
         )
         result = verify_claude_runtime(ctx)
@@ -873,7 +864,8 @@ class TestVerifyClaudeRuntime:
         to Opus 4.7 on an install with pre-0.1.60 SDK already present.
         """
         import logging
-        from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
+
+        from ouroboros.claude_runtime import ClaudeRuntimeContext, verify_claude_runtime
 
         calls = []
 
@@ -884,15 +876,9 @@ class TestVerifyClaudeRuntime:
                 return SimpleNamespace(returncode=0, stdout="ok|0.1.50", stderr="")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        ctx = BootstrapContext(
-            bundle_dir=tmp_path,
-            repo_dir=tmp_path,
-            data_dir=tmp_path,
-            settings_path=tmp_path / "settings.json",
+        ctx = ClaudeRuntimeContext(
             embedded_python="/fake/python3",
-            app_version="1.0.0",
             hidden_run=fake_run,
-            save_settings=lambda s: None,
             log=logging.getLogger("test"),
         )
         result = verify_claude_runtime(ctx)
@@ -904,7 +890,8 @@ class TestVerifyClaudeRuntime:
     def test_verify_triggers_repair_when_missing(self, tmp_path):
         """When SDK check fails (ModuleNotFoundError etc), repair install is attempted."""
         import logging
-        from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
+
+        from ouroboros.claude_runtime import ClaudeRuntimeContext, verify_claude_runtime
 
         calls = []
 
@@ -915,15 +902,9 @@ class TestVerifyClaudeRuntime:
                 return SimpleNamespace(returncode=1, stdout="", stderr="ModuleNotFoundError")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        ctx = BootstrapContext(
-            bundle_dir=tmp_path,
-            repo_dir=tmp_path,
-            data_dir=tmp_path,
-            settings_path=tmp_path / "settings.json",
+        ctx = ClaudeRuntimeContext(
             embedded_python="/fake/python3",
-            app_version="1.0.0",
             hidden_run=fake_run,
-            save_settings=lambda s: None,
             log=logging.getLogger("test"),
         )
         result = verify_claude_runtime(ctx)
@@ -936,26 +917,26 @@ class TestVersionTuple:
     """_version_tuple parses PEP 440-ish version strings for comparison."""
 
     def test_parses_simple_version(self):
-        from ouroboros.launcher_bootstrap import _version_tuple
+        from ouroboros.claude_runtime import _version_tuple
         assert _version_tuple("0.1.60") == (0, 1, 60)
 
     def test_strips_post_suffix(self):
-        from ouroboros.launcher_bootstrap import _version_tuple
+        from ouroboros.claude_runtime import _version_tuple
         assert _version_tuple("0.1.60.post1") == (0, 1, 60)
 
     def test_strips_pre_release_suffix(self):
-        from ouroboros.launcher_bootstrap import _version_tuple
+        from ouroboros.claude_runtime import _version_tuple
         # "0.1.60rc1" → parses "0", "1", "60" (rc1 stops at first non-digit)
         assert _version_tuple("0.1.60rc1") == (0, 1, 60)
 
     def test_comparison_semantics(self):
-        from ouroboros.launcher_bootstrap import _version_tuple
+        from ouroboros.claude_runtime import _version_tuple
         assert _version_tuple("0.1.50") < _version_tuple("0.1.60")
         assert _version_tuple("0.1.60") >= _version_tuple("0.1.60")
         assert _version_tuple("0.1.61") > _version_tuple("0.1.60")
         assert _version_tuple("0.2.0") > _version_tuple("0.1.99")
 
     def test_empty_returns_zero(self):
-        from ouroboros.launcher_bootstrap import _version_tuple
+        from ouroboros.claude_runtime import _version_tuple
         assert _version_tuple("") == (0,)
         assert _version_tuple("garbage") == (0,)

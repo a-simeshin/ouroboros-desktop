@@ -1,12 +1,14 @@
 # NO SHIT Ouroboros FORK
 
+Текущая версия: **5.8.1** (см. `VERSION`).
+
 Отличная идея EvoLoop с отвратительной реализацией под масштабирование в облаке.
 Этот форк призван исправить/удалить весь проблемный код, сделать агента масштабируемым в облаке.
 
 > **🔱 Fork notice:** Форк от [joi-lab/ouroboros-desktop](https://github.com/joi-lab/ouroboros-desktop). Все отличия от upstream помечены тегом **🔱 [fork]**. Текущая дивергенция:
 >
 > - **🔱 [fork] K8s / headless-режим** — `WEBUI_ONLY` (отключает Telegram-мост, секцию настроек, шаги онбординга), `OUROBOROS_TOOLS_ENABLED` whitelist для `ToolRegistry`, generic `configure_remote_url(url, user, password)` для любого HTTPS git-сервера (GitHub/GitLab/Gitea/Bitbucket), bootstrap-pull + shutdown-push в `ouroboros/git_sync`, pytest `docker` marker + testcontainers integration-тесты, conftest fixture против `MagicMock`-leak'ов. Спека: [`specs/k8s-deployment-readiness.md`](specs/k8s-deployment-readiness.md).
-> - **🔱 [fork] План: убрать PyInstaller/launcher** — 8-фазный refactor-план снять desktop-бандлы (.dmg/.exe/.tar.gz, `launcher.py` PyWebView, embedded python-build-standalone, `repo.bundle`) и оставить только run-from-source + docker/k8s. Пока только спека, кода нет. Документ: [`specs/remove-pyinstaller-launcher-pipeline.md`](specs/remove-pyinstaller-launcher-pipeline.md).
+> - **🔱 [fork] Удалён desktop bundle pipeline** — снят PyInstaller / launcher / `.dmg`/`.exe`/`.tar.gz` / embedded python-build-standalone / `repo.bundle`. Поддерживаются ровно два пути запуска: `python server.py` (run-from-source) и `docker run ouroboros-web` (контейнер). Подробности — `docs/ARCHITECTURE.md`. Migration для бывших bundle-пользователей — раздел "Upgrade from desktop bundle" ниже. Спека: [`specs/remove-pyinstaller-launcher-pipeline.md`](specs/remove-pyinstaller-launcher-pipeline.md).
 > - **🔱 [fork] README** — почти полностью переписан, маркетинговый блок и desktop-инструкции upstream'а удалены.
 
 ---
@@ -29,43 +31,104 @@
 
 ---
 
-## Run from Source
+## Quick Start
 
-### Setup
+Поддерживаются ровно два пути запуска: **run-from-source** (`python server.py`) и **Docker**. Никаких десктопных бандлов (`.dmg`/`.exe`/`.tar.gz`), launcher'а, PyInstaller'а, embedded python-build-standalone больше нет — см. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) для деталей runtime-модели.
+
+### Run from source
 
 ```bash
 git clone https://github.com/a-simeshin/ouroboros-desktop.git
 cd ouroboros-desktop
 pip install -r requirements.txt
-```
-
-### Run
-
-```bash
 python server.py
 ```
 
-Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
+После старта откройте `http://127.0.0.1:8765` в браузере. Setup wizard проведёт через настройку API-ключей.
 
-You can also override the bind address and port:
+При первом запуске `server.py::main()` вызывает `ensure_repo_present()`: если `REPO_DIR` не существует или не содержит `.git`, процесс падает с понятным сообщением и инструкцией. Это защищает от запуска против пустого PVC-маунта или кривого `OUROBOROS_REPO_DIR`.
+
+Bind-адрес и порт настраиваются флагами:
 
 ```bash
 python server.py --host 127.0.0.1 --port 9000
 ```
-
-Available launch arguments:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--host` | `127.0.0.1` | Host/interface to bind the web server to |
 | `--port` | `8765` | Port to bind the web server to |
 
-The same values can also be provided via environment variables:
+То же через переменные окружения:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OUROBOROS_SERVER_HOST` | `127.0.0.1` | Default bind host |
 | `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
+| `OUROBOROS_REPO_DIR` | директория, в которой лежит `server.py` | Корень self-modifying репозитория агента (должен быть существующим git checkout) |
+| `OUROBOROS_DATA_DIR` | `~/Ouroboros/data` | Куда писать `settings.json`, state, memory, logs, uploads |
+
+### Run with Docker
+
+Docker — для web UI / runtime, не для desktop bundle. Контейнер биндится к `0.0.0.0:8765` по умолчанию, и образ выставляет `OUROBOROS_FILE_BROWSER_DEFAULT=${APP_HOME}` так что у Files tab всегда есть явный network-safe root.
+
+> **Browser tools на Linux/Docker:** `Dockerfile` запускает `playwright install-deps chromium` (authoritative Playwright dependency resolver) + `playwright install chromium`, так что `browse_page` и `browser_action` работают из коробки. Для source-инсталла на Linux без Docker: `python3 -m playwright install-deps chromium` (требует sudo / доступ к distro packages).
+
+Сборка образа:
+
+```bash
+docker build -t ouroboros-web .
+```
+
+Запуск на дефолтном порту:
+
+```bash
+docker run --rm -p 8765:8765 \
+  -e OUROBOROS_NETWORK_PASSWORD='choose-a-password' \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web
+```
+
+Кастомный порт через env:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OUROBOROS_SERVER_PORT=9000 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web
+```
+
+То же через launch arguments:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web --port 9000
+```
+
+Headless-режим (без Telegram-моста и секции настроек):
+
+```bash
+docker run --rm -p 8765:8765 \
+  -e WEBUI_ONLY=1 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web
+```
+
+Required/important env vars:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OUROBOROS_NETWORK_PASSWORD` | Optional | Включает password gate на non-loopback access |
+| `OUROBOROS_FILE_BROWSER_DEFAULT` | Defaults to `${APP_HOME}` в образе | Явный root, видимый в Files tab |
+| `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
+| `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` в Docker |
+| `WEBUI_ONLY` | Optional | **🔱 [fork]** Headless: отключает Telegram, секцию настроек, telegram-шаги онбординга |
+| `OUROBOROS_TOOLS_ENABLED` | Optional | **🔱 [fork]** Comma-separated whitelist для `ToolRegistry` |
 
 ### Provider Routing
 
@@ -99,72 +162,24 @@ make test
 
 ---
 
-## Build
+## Upgrade from desktop bundle
 
-### Docker (web UI)
+Версии до удаления desktop pipeline устанавливались как `.dmg`/`.exe`/`.tar.gz` и содержали PyInstaller-launcher, который автоматически разворачивал репозиторий агента в `~/Ouroboros/repo/` из embedded `repo.bundle`. Начиная с этой версии bundle pipeline удалён — поддерживается только run-from-source и Docker.
 
-Docker is for the web UI/runtime flow, not the desktop bundle. The container binds to
-`0.0.0.0:8765` by default, and the image now also defaults `OUROBOROS_FILE_BROWSER_DEFAULT`
-to `${APP_HOME}` so the Files tab always has an explicit network-safe root inside the container.
-
-> **Browser tools on Linux/Docker:** The `Dockerfile` runs `playwright install-deps chromium`
-> (authoritative Playwright dependency resolver) and `playwright install chromium` so
-> `browse_page` and `browser_action` work out of the box in the container. For source
-> installs on Linux without Docker, run:
-> `python3 -m playwright install-deps chromium` (requires sudo / distro package access).
-
-Build the image:
+Если у вас был ранее установлен Ouroboros через bundle и вы хотите продолжить использовать **тот же checkout**:
 
 ```bash
-docker build -t ouroboros-web .
+# Вариант 1 — прямой запуск против старого репо через env var:
+OUROBOROS_REPO_DIR=~/Ouroboros/repo python /path/to/cloned/server.py
+
+# Вариант 2 — перейти в старый checkout и запустить server.py оттуда:
+cd ~/Ouroboros/repo
+python server.py
 ```
 
-Run on the default port:
+Альтернатива — свежий `git clone` из текущего репозитория и запуск как описано в "Quick Start". Данные (`settings.json`, state, memory, logs) остаются в `~/Ouroboros/data/` и переиспользуются автоматически — `OUROBOROS_DATA_DIR` указывает на то же расположение по умолчанию.
 
-```bash
-docker run --rm -p 8765:8765 \
-  -e OUROBOROS_NETWORK_PASSWORD='choose-a-password' \
-  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
-  -v "$PWD:/workspace" \
-  ouroboros-web
-```
-
-Use a custom port via environment variables:
-
-```bash
-docker run --rm -p 9000:9000 \
-  -e OUROBOROS_SERVER_PORT=9000 \
-  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
-  -v "$PWD:/workspace" \
-  ouroboros-web
-```
-
-Run with launch arguments instead:
-
-```bash
-docker run --rm -p 9000:9000 \
-  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
-  -v "$PWD:/workspace" \
-  ouroboros-web --port 9000
-```
-
-Required/important environment variables:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OUROBOROS_NETWORK_PASSWORD` | Optional | Enables the non-loopback password gate when set |
-| `OUROBOROS_FILE_BROWSER_DEFAULT` | Defaults to `${APP_HOME}` in the image | Explicit root directory exposed in the Files tab |
-| `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
-| `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` in Docker |
-
-Example: mount a host workspace and expose only that directory in Files:
-
-```bash
-docker run --rm -p 8765:8765 \
-  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
-  -v "$PWD:/workspace" \
-  ouroboros-web
-```
+Архитектура runtime-режима (single-process server, supervisor в фоновом thread'е, `ensure_repo_present()` fail-fast hook) описана в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 

@@ -12,12 +12,9 @@ import os
 import pathlib
 import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
-from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquire
-from ouroboros.platform_layer import pid_lock_release as _compat_pid_lock_release
 from ouroboros.provider_models import migrate_model_value
-
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -30,8 +27,6 @@ SETTINGS_PATH = pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH", DATA_DIR 
 PID_FILE = pathlib.Path(os.environ.get("OUROBOROS_PID_FILE", APP_ROOT / "ouroboros.pid"))
 PORT_FILE = pathlib.Path(os.environ.get("OUROBOROS_PORT_FILE", DATA_DIR / "state" / "server_port"))
 
-RESTART_EXIT_CODE = 42
-PANIC_EXIT_CODE = 99
 AGENT_SERVER_PORT = 8765
 
 
@@ -321,7 +316,8 @@ def direct_provider_review_models_fallback(provider: str) -> list[str]:
     if not main_model.startswith(provider_prefix):
         return []
     from ouroboros.provider_models import (
-        OPENAI_DIRECT_DEFAULTS, ANTHROPIC_DIRECT_DEFAULTS,
+        ANTHROPIC_DIRECT_DEFAULTS,
+        OPENAI_DIRECT_DEFAULTS,
     )
     _defaults = {
         "openai": OPENAI_DIRECT_DEFAULTS,
@@ -826,17 +822,3 @@ def apply_settings_to_env(settings: dict) -> None:
         os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
 
 
-# ---------------------------------------------------------------------------
-# PID lock (single instance) — crash-proof locking via ouroboros.platform_layer.
-# On Unix the OS releases flock automatically when the process dies
-# (even SIGKILL), so stale lock files can never block future launches.
-# On Windows msvcrt.locking provides equivalent semantics.
-# ---------------------------------------------------------------------------
-
-def acquire_pid_lock() -> bool:
-    APP_ROOT.mkdir(parents=True, exist_ok=True)
-    return _compat_pid_lock_acquire(str(PID_FILE))
-
-
-def release_pid_lock() -> None:
-    _compat_pid_lock_release(str(PID_FILE))

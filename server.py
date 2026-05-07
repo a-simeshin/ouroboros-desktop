@@ -225,7 +225,7 @@ async def broadcast_ws(msg: dict) -> None:
                 except ValueError:
                     pass
         try:
-            from ouroboros.utils import utc_now_iso, append_jsonl
+            from ouroboros.utils import append_jsonl, utc_now_iso
             append_jsonl(
                 DATA_DIR / "logs" / "events.jsonl",
                 {
@@ -1225,7 +1225,7 @@ async def api_claude_code_install(request: Request) -> JSONResponse:
         # meant to eliminate (one edit to `_CLAUDE_SDK_BASELINE` and one here
         # would diverge silently). If the import truly fails, the runtime is
         # already unusable and the caller should see the error.
-        from ouroboros.launcher_bootstrap import _CLAUDE_SDK_BASELINE as sdk_baseline
+        from ouroboros.claude_runtime import _CLAUDE_SDK_BASELINE as sdk_baseline
 
         result = await asyncio.to_thread(
             lambda: _sp.run(
@@ -1975,7 +1975,7 @@ async def lifespan(app):
     # it here makes source-mode (``python server.py``) installs land at
     # the same layout so the Skills/Marketplace UI sees a consistent tree.
     try:
-        from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
+        from ouroboros.skill_loader import ensure_data_skills_seeded
         ensure_data_skills_seeded()
         from ouroboros.skill_migrations import (
             migrate_generation_skill_names,
@@ -2152,7 +2152,24 @@ def _emergency_process_cleanup() -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def ensure_repo_present() -> None:
+    """Fail-fast if server-local REPO_DIR is missing or not a git checkout.
+
+    For docker/k8s: REPO_DIR must come from image content or PVC mount.
+    For run-from-source: user clones the repo before running server.py.
+    Override via OUROBOROS_REPO_DIR env (existing escape hatch from server.py:53).
+    """
+    if not REPO_DIR.exists() or not (REPO_DIR / ".git").is_dir():
+        raise SystemExit(
+            f"REPO_DIR not found at {REPO_DIR}.\n"
+            f"For docker/k8s: ensure image content or PVC mount populates this path.\n"
+            f"For run-from-source: clone the agent repo before running server.py, "
+            f"or set OUROBOROS_REPO_DIR=<path-to-existing-checkout>."
+        )
+
+
 def main() -> int:
+    ensure_repo_present()
     try:
         saved_host = str(load_settings().get("OUROBOROS_SERVER_HOST") or "").strip()
     except Exception:

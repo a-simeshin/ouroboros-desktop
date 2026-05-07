@@ -11,11 +11,7 @@ It is the single source of truth for how the system works. Keep it updated.
 User
   │
   ▼
-launcher.py (PyWebView)       ← desktop window, immutable outer shell (tracked in git; bundled as packaged entry point)
-  │
-  │  spawns subprocess
-  ▼
-server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (default localhost:8765; Docker/non-loopback supported via OUROBOROS_SERVER_HOST=0.0.0.0)
+server.py (Starlette+uvicorn) ← single main process; HTTP + WebSocket on configurable host:port (default localhost:8765; Docker/non-loopback supported via OUROBOROS_SERVER_HOST=0.0.0.0)
   │
   ├── web/                     ← Web UI (SPA with ES modules in web/modules/)
   │
@@ -57,7 +53,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
       ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
-      ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
+      ├── claude_runtime.py    ← Claude Agent SDK validation: `_CLAUDE_SDK_BASELINE`, `_CLAUDE_SDK_MIN_VERSION`, `_version_tuple`, `verify_claude_runtime`, `ClaudeRuntimeContext`
       ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
       ├── reflection.py        ← Execution reflection and pattern capture
@@ -116,42 +112,67 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
-.github/workflows/ci.yml     ← Four-tier CI (quick / full / integration / build+release)
-build.sh                      ← macOS build (PyInstaller → .dmg)
-build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
-build_windows.ps1             ← Windows build (PyInstaller → .zip)
-scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
+.github/workflows/ci.yml     ← CI tiers (quick / full / integration / docker smoke)
 scripts/run_external_review.py ← v5.1.2 dev-loop tool: invokes `ouroboros.tools.parallel_review.run_parallel_review` from outside the runtime against `git diff --cached`. Reads `~/Ouroboros/data/settings.json` for `OPENROUTER_API_KEY` / `OUROBOROS_REVIEW_MODELS` / `OUROBOROS_SCOPE_REVIEW_MODEL`, builds a minimal `ToolContext`, prints FULL raw triad+scope output (no truncation). Used to dry-run the same review pipeline `repo_commit` triggers before any actual commit. Output: stdout (and optional `--output PATH`). Not part of the runtime gate; review-exempt dev tool.
 Dockerfile                    ← Docker image (web UI runtime)
 ```
 
-### Two-process model
+### Single-process server runtime
 
-1. **launcher.py** — immutable outer shell (tracked in the git repo; bundled as the packaged entry point via PyInstaller). Never self-modifies. Handles:
-   - PID lock (single instance)
-   - Bootstrap: initializes `~/Ouroboros/repo/` from the embedded `repo.bundle` +
-     `repo_bundle_manifest.json` on the first launcher-managed run
-   - Managed repo hand-off: after first bootstrap, keeps using the launcher-managed
-     git checkout and normal managed-remote branch updates instead of per-launch
-     file overwrites
-   - Starts `server.py` as a subprocess via embedded Python
-   - Shows PyWebView window pointed at `http://127.0.0.1:8765`
-   - Monitors subprocess; restarts on exit code 42 (restart signal)
-  - First-run wizard (shared desktop/web onboarding for multi-key and optional local setup)
-   - **Graceful shutdown with orphan cleanup** (see Shutdown section below)
+`server.py` is the one and only main process. Two supported deployment paths:
 
-2. **server.py** — self-editable inner server. Can be modified by the agent.
-   - Starlette app with HTTP API + WebSocket
-   - Runs supervisor in a background thread
-   - Supervisor manages worker pool, task queue, message routing
-   - Local model lifecycle endpoints extracted to `ouroboros/local_model_api.py`
+1. **Run-from-source** — `python server.py` from a git checkout of this repository.
+2. **Docker / k8s** — `docker run ouroboros-web` (or the corresponding pod spec).
+   The image bakes the agent repo into `${APP_HOME}` so the container has a working
+   `REPO_DIR` from the moment it boots.
+
+There is no longer any desktop bundle, launcher, PyInstaller `.dmg`/`.exe`/`.tar.gz`
+artifact, embedded `python-build-standalone` interpreter, or `repo.bundle` extraction
+step. The agent runs as one Python process owned directly by systemd, Docker, k8s,
+or the developer's shell.
+
+`server.py` responsibilities:
+
+- Starlette ASGI app with HTTP API + WebSocket served by uvicorn.
+- Supervisor loop runs in a **background thread** inside the same process; it
+  manages the worker pool, task queue, message routing, and Telegram bridge.
+- Local model lifecycle endpoints extracted to `ouroboros/local_model_api.py`.
+- Self-editable: the agent commits changes to its own working tree under
+  `REPO_DIR` and uses `os._exit()` with a well-known code to ask the supervising
+  process manager (systemd / Docker `--restart=on-failure` / k8s pod restart
+  policy) to bring it back up against the new code.
+
+#### Process exit codes
+
+`server.py` defines two self-restart exit codes locally (`server.py:84-85`):
+
+- `RESTART_EXIT_CODE = 42` — soft restart (agent applied an update intent or
+  the operator hit `/restart`).
+- `PANIC_EXIT_CODE = 99` — emergency stop (`/panic`, BIBLE.md Emergency Stop
+  Invariant). All workers, subprocess trees, consciousness, and evolution
+  loops are torn down before the process exits.
+
+These codes are **not** coupled to any launcher. They exist so that systemd
+`Restart=on-failure` or Docker `--restart=on-failure` (and k8s pod restart
+policy) can decide whether to relaunch the process. For a one-shot panic
+without auto-restart, the operator runs the container with `--restart=no`
+or stops the systemd unit.
+
+#### `ensure_repo_present()` fail-fast
+
+On startup, `server.py::main()` calls `ensure_repo_present()` which raises
+`SystemExit` with an actionable message if `REPO_DIR` doesn't exist or doesn't
+contain a `.git` directory. This guards against running against an empty PVC
+mount or a misconfigured `OUROBOROS_REPO_DIR` env var. The default for
+`REPO_DIR` is the directory holding `server.py`; override via
+`OUROBOROS_REPO_DIR=<path-to-existing-checkout>`.
 
 ### Data layout (`~/Ouroboros/`)
 
 ```
 ~/Ouroboros/
-├── repo/              ← Agent's self-modifying git repository
-│   ├── server.py      ← The running server (kept in sync via the launcher-managed git clone, NOT copied from the workspace on each launch; see §2)
+├── repo/              ← Agent's self-modifying git repository (legacy default location for desktop-bundle installs; for run-from-source the agent runs against its own clone, for Docker against `${APP_HOME}` baked into the image — both can be redirected via OUROBOROS_REPO_DIR)
+│   ├── server.py      ← The running server (the agent edits and self-commits this file in place)
 │   ├── ouroboros/      ← Agent core package
 │   │   └── local_model_api.py  ← Local model API endpoints (extracted from server.py)
 │   ├── supervisor/     ← Supervisor package
@@ -212,24 +233,21 @@ Dockerfile                    ← Docker image (web UI runtime)
 ## 2. Startup / Onboarding Flow
 
 ```
-launcher.py main()
+server.py main()
   │
-  ├── acquire_pid_lock()        → Show "already running" if locked
-  ├── check_git()               → Show "install git" wizard if missing
-  ├── bootstrap_repo()          → ensure_managed_repo(): first run clones from the embedded
-  │                               repo.bundle + validates repo_bundle_manifest.json;
-  │                               subsequent runs verify the managed clone's bootstrap pin
-  │                               (source_sha + release_tag + bundle_sha256) and ensure the
-  │                               managed remote metadata exists. Ordinary restart cleanup
-  │                               lives in supervisor/git_ops.checkout_and_reset(), called by
-  │                               server.py::_bootstrap_supervisor_repo(); it preserves the
-  │                               local branch HEAD and cleans only the working tree. Explicit
-  │                               Update Now uses a pinned update-intent SHA for official reset.
-  ├── _run_first_run_wizard()   → Show shared setup wizard if no runnable config
+  ├── ensure_repo_present()     → Fail-fast SystemExit if REPO_DIR is missing or
+  │                               does not contain a `.git` directory. Hint message
+  │                               points at OUROBOROS_REPO_DIR for run-from-source
+  │                               and at PVC/image content for docker/k8s.
+  ├── _bootstrap_supervisor_repo() → supervisor/git_ops.checkout_and_reset() preserves
+  │                               local branch HEAD and cleans only the working tree.
+  │                               Explicit Update Now uses a pinned update-intent SHA
+  │                               for official reset.
+  ├── _run_first_run_wizard()   → Web overlay setup wizard if no runnable config
   │                               (access entry → models → review mode → budget → summary)
   │                               Saves to ~/Ouroboros/data/settings.json
-  ├── agent_lifecycle_loop()    → Background thread: start/monitor server.py
-  └── webview.start()           → Open PyWebView window at http://127.0.0.1:8765
+  ├── start_supervisor()        → Background thread: workers + queue + message bus
+  └── uvicorn.run()             → ASGI server on http://${HOST}:${PORT} (default 127.0.0.1:8765)
 ```
 
 ### First-run wizard
@@ -238,36 +256,40 @@ Shown when `settings.json` does not contain any supported remote provider key an
 `LOCAL_MODEL_SOURCE`.
 
 - Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or local-model-source settings skip the wizard automatically.
-- The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
+- The wizard is a blocking web overlay rendered into the SPA — Run-from-source and Docker share the same flow.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
 - When an Anthropic key is present, onboarding shows the Claude runtime status with `Repair Runtime` and `Skip for now` options.
-- Desktop first-run uses the same onboarding bundle and talks to Claude SDK install/status through `pywebview` bridge methods.
-  Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
+- Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install` for Claude SDK install/status.
 - The wizard blocks progression if nothing runnable is configured.
 - When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default model values are auto-remapped to `openai::gpt-5.5` / `openai::gpt-5.5-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
 - `web_search` uses the official OpenAI Responses API only. It requires `OPENAI_API_KEY` and treats any non-empty `OPENAI_BASE_URL` as an incompatible custom runtime configuration rather than a fallback.
 - OpenAI-compatible and Cloud.ru remain explicit model-selection flows from the full Settings page because there is no single safe universal default model ID for those providers.
 - Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 
-### Launcher-managed bundle bootstrap
+### Repo presence + REPO_DIR resolution
 
-Packaged releases ship an embedded git bundle (`repo.bundle`) plus
-`repo_bundle_manifest.json`. On the first launcher-managed run the launcher:
+There is no embedded `repo.bundle` and no first-run extraction step. The agent
+runs against an existing git checkout, supplied by one of:
 
-- verifies the manifest against the packaged app version,
-- checks the bundle SHA-256,
-- initializes `~/Ouroboros/repo/` as a managed git checkout,
-- checks out the manifest-pinned `source_sha`,
-- then keeps the managed checkout as the self-modifying local branch.
-  Later launches clean the working tree without moving local commits;
-  official branch following happens only through explicit managed updates.
-  If a newer app bundle carries different embedded repo metadata, the
-  launcher refreshes the managed remote/manifest metadata in place instead
-  of archiving and replacing an existing git checkout.
+- **Run-from-source** — the user clones this repository and runs `python server.py`
+  from inside it. `REPO_DIR` defaults to the directory holding `server.py`.
+- **Docker** — the image is built with the repo content baked into `${APP_HOME}`
+  (Dockerfile copies the workspace and runs `git init` if needed). `REPO_DIR`
+  resolves to that path inside the container.
+- **k8s / generic deployment** — `OUROBOROS_REPO_DIR` env var points at a
+  pre-populated PVC mount or sidecar-cloned directory. The same `ensure_repo_present()`
+  hook validates the path before uvicorn starts.
 
-Safety-critical protection is no longer implemented as "copy these files from the
-bundle on every launch". The runtime guardrails are the hardcoded sandbox /
-post-edit revert in `registry.py` plus the launcher-managed repo integrity checks.
+`server.py:53` reads `REPO_DIR` from `OUROBOROS_REPO_DIR` and falls back to
+`pathlib.Path(__file__).parent`. `ensure_repo_present()` (called from `main()`
+before `start_supervisor()` / `uvicorn.run()`) raises `SystemExit` with an
+actionable message when the path is missing or not a git checkout — fail-fast,
+no auto-init magic.
+
+Safety-critical protection is enforced exclusively by the runtime guardrails:
+the hardcoded sandbox / post-edit revert in `registry.py`, the protected-path
+policy in `runtime_mode_policy.py`, and the normal triad + scope commit review
+gate. There is no bundle-level verification step.
 
 ### Single-source rescue on startup (v4.36.1+)
 
@@ -281,7 +303,8 @@ pytest-subprocess paths never see a dirty tree they could accidentally commit.
 
 ```mermaid
 flowchart TD
-    L[launcher.py] -->|spawn| S[server.py lifespan]
+    M["server.py main()"] --> ER["ensure_repo_present()<br/>(SystemExit if REPO_DIR missing)"]
+    ER --> S["server.py lifespan startup"]
     S --> B["_bootstrap_supervisor_repo()"]
     B --> SR["safe_restart(rescue_and_reset)"]
     SR --> RS["_create_rescue_snapshot() → rescue directory<br/>(only if dirty tree)"]
@@ -297,11 +320,11 @@ Worker-side `ouroboros/agent_startup_checks.py::check_uncommitted_changes()` is
 **warning-only**: it emits a `supervisor_side_rescue_owns_this` skip marker in
 its result when the tree is dirty, and never runs `git add` or `git commit`.
 Prior to v4.36.1, the worker-side path performed its own `auto-rescue` commit
-directly on `ouroboros`; because `OUROBOROS_MANAGED_BY_LAUNCHER=1` is inherited
-by every subprocess (pytest runs, A2A agent-card builder via
-`_build_skills_from_registry`, supervisor-side `_get_chat_agent`), any of those
-code paths would steal the agent's in-progress edits into a commit. The v4.36.1
-change removes that duplicate rescue mechanism entirely.
+directly on `ouroboros`; because that env was inherited by every subprocess
+(pytest runs, A2A agent-card builder via `_build_skills_from_registry`,
+supervisor-side `_get_chat_agent`), any of those code paths would steal the
+agent's in-progress edits into a commit. The v4.36.1 change removes that
+duplicate rescue mechanism entirely.
 
 ### Agent interpreter handle (`OUROBOROS_AGENT_PYTHON`)
 
@@ -345,12 +368,12 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `page_header.js` — v5.7.2 shared page-header/tab-strip renderer used by Settings, Dashboard, Skills, Widgets, Files, and Chat; escapes title/description/labels and emits shared `app-page-*` / `app-tab-*` classes without inline styles.
-- `skills.js` — Skills page (discover + enable/disable + review trigger + Repair task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Repair prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
+- `skills.js` — Skills page (discover + enable/disable + review trigger + Repair task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Repair prompts through `/api/command`. Per-skill core-key grants are owner-only and written by an out-of-band path; the API endpoint returns 403.)
 - `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, async job forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media, **map/calendar/kanban (v5.7.0)**) and tears down widget timers/listeners/streams on remount while resuming async jobs by `job_id`. **v5.7.0** also adds `kind: "module"` widgets: the host fetches reviewed `widget.js` through `/api/extensions/<skill>/module/<entry>`, embeds it into a sandboxed `<iframe srcdoc sandbox="allow-scripts">` with no `allow-same-origin`, and injects a parent-mediated `fetch` bridge restricted to `/api/extensions/<skill>/...`.
 
 (`about.js` was removed in v5.7.0 when About moved into Settings as a sub-tab.)
 
-Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboard, Settings). About lives as a sub-tab inside Settings (v5.7.0+) — there is no top-level About page; the desktop launcher's `#nav-version` span keeps a compact version label visible above the rail's footer. Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings holds Providers / Models / Behavior / Integrations / Advanced / About sub-tabs. The Dashboard nav button uses the Lucide `gauge` icon (a half-circle speedometer with needle) — the previous `layout-dashboard` glyph was visually indistinguishable from the `layout-grid` Widgets glyph at 20×20 px. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row; justify-content: safe center` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Mobile Settings keeps the horizontal pill strip (no drill-down accordion) — the active pill auto-scrolls into view via `scrollIntoView({ inline: 'center' })`. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. Each skill card carries a kebab (⋮) menu in its header (right of the toggle) that opens as an anchored non-modal popover via `dialog.show()`; the menu hosts Re-review / Update / Uninstall actions. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
+Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboard, Settings). About lives as a sub-tab inside Settings (v5.7.0+) — there is no top-level About page; the `#nav-version` span keeps a compact version label visible above the rail's footer. Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings holds Providers / Models / Behavior / Integrations / Advanced / About sub-tabs. The Dashboard nav button uses the Lucide `gauge` icon (a half-circle speedometer with needle) — the previous `layout-dashboard` glyph was visually indistinguishable from the `layout-grid` Widgets glyph at 20×20 px. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row; justify-content: safe center` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Mobile Settings keeps the horizontal pill strip (no drill-down accordion) — the active pill auto-scrolls into view via `scrollIntoView({ inline: 'center' })`. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. Each skill card carries a kebab (⋮) menu in its header (right of the toggle) that opens as an anchored non-modal popover via `dialog.show()`; the menu hosts Re-review / Update / Uninstall actions. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
 
 v5.7.2 normalizes page-level headers and top tab strips through `web/modules/page_header.js`: Settings, Dashboard, Skills, Widgets, Files, and Chat share the same title/action/tab structure and `app-page-*` / `app-tab-*` CSS rhythm. Chat keeps the `chat-page-header` overlay variant for scroll-under behavior; Settings/Dashboard/Skills tabs are all horizontal pill strips.
 
@@ -387,7 +410,7 @@ v5.7.2 normalizes page-level headers and top tab strips through `web/modules/pag
 - **Browser pane**: directory tree for the configured root, breadcrumb navigation, inline filter, refresh button,
   create-file/create-directory actions, clipboard-style copy/move/paste, and delete/download context menu.
 - **Preview pane**: text preview/editor, image preview, PDF preview in a sandboxed iframe, binary-file placeholder, and drag-drop upload target.
-- **Download/Open externally**: the web fallback downloads via Blob URLs; the desktop launcher bridge (`MainApi.download_file_to_downloads`) accepts local `/api/files/download` and same-origin `/api/extensions/<skill>/...` URLs on the active server port, writes to the OS Downloads folder, and can then open the saved file through `platform_layer.open_path_external`. Widget download controls use the same host-owned helper so media downloads never navigate the Ouroboros window away from the app.
+- **Download/Open externally**: downloads happen through standard browser Blob URLs over `/api/files/download` and same-origin `/api/extensions/<skill>/...` routes. There is no host-process bridge — the web flow is the only flow.
 - **Write safety**: unsaved text edits are guarded on folder switches, file switches, page navigation, and browser refresh.
 - **Root policy**: localhost requests fall back to the current user's home directory when no root is configured.
   Network/Docker access requires an explicit `OUROBOROS_FILE_BROWSER_DEFAULT` directory.
@@ -414,7 +437,7 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Claude Runtime Status**: the Anthropic card shows app-managed Claude runtime status with a `Repair Runtime` action. The card is visible when the user has configured `ANTHROPIC_API_KEY` **or** when the last `/api/claude-code/status` poll stored a non-empty `error` on the runtime card state (`claudeRuntimeHasError` in `web/modules/settings.js::applyClaudeCodeStatus`). Two distinct paths set that `error`: (a) backend `ouroboros/platform_layer.py::resolve_claude_runtime` marks the SDK below the `_CLAUDE_SDK_MIN_VERSION` baseline (the only backend-originated path today — other not-ready conditions such as a missing bundled CLI currently fall through to `status_label() == "no_api_key"` until a key is configured); (b) the browser-side `refreshClaudeCodeStatus` `catch` block synthesizes an error payload for any `/api/claude-code/status` transport failure, non-OK HTTP response, or JSON parse error, so loss of connectivity to the backend also surfaces the card before a key is configured. The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
-- **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password + restart-required `OUROBOROS_SERVER_HOST`) at the bottom. The Network Gate section also shows a read-only LAN hint (via `_meta` from `/api/settings`): loopback-bound instances show a restart instruction, LAN-reachable instances show a clickable URL, and non-loopback binds without `OUROBOROS_NETWORK_PASSWORD` render as a warning with a set-password CTA. Saving a non-loopback host through `/api/settings` is limited to wildcard hosts (`0.0.0.0`, `::`) and requires a non-empty `OUROBOROS_NETWORK_PASSWORD` in the same save; specific LAN IP binds are manual/env-only so the desktop launcher can keep probing loopback reliably. Manual env/settings-before-launch and Docker flows may still bind open by explicit operator choice. Bracketed IPv6 literals (e.g. `[::1]`) are normalized by `_build_network_meta` — brackets are stripped before the `is_loopback_host` classification, and URL construction uniformly re-brackets IPv6 addresses so there is no double-bracketing.
+- **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password + restart-required `OUROBOROS_SERVER_HOST`) at the bottom. The Network Gate section also shows a read-only LAN hint (via `_meta` from `/api/settings`): loopback-bound instances show a restart instruction, LAN-reachable instances show a clickable URL, and non-loopback binds without `OUROBOROS_NETWORK_PASSWORD` render as a warning with a set-password CTA. Saving a non-loopback host through `/api/settings` is limited to wildcard hosts (`0.0.0.0`, `::`) and requires a non-empty `OUROBOROS_NETWORK_PASSWORD` in the same save; specific LAN IP binds are manual/env-only. Manual env/settings-before-launch and Docker flows may still bind open by explicit operator choice. Bracketed IPv6 literals (e.g. `[::1]`) are normalized by `_build_network_meta` — brackets are stripped before the `is_loopback_host` classification, and URL construction uniformly re-brackets IPv6 addresses so there is no double-bracketing.
 - **Models tab**: Main, Code, Light, Fallback model routing. Each card has a `Local` toggle to route through the GGUF server configured in Advanced. `Claude Code Model` field selects the Anthropic model for `claude_code_edit` / `advisory_pre_review`.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. The backend uses native async `httpx.AsyncClient` provider calls (no default-threadpool `requests` path); failures are non-fatal and the API response includes provider `stage`/`duration_ms` metadata while the Settings inline warning stays compact (provider names only). The browser refresh uses a 25s `AbortController` timeout and ignores stale refresh completions so older requests cannot wipe newer catalog results.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models. Selecting a model writes it into the field and closes the results panel; typing/focus reopens the filtered list.
@@ -438,9 +461,9 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 - **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.5` + `openai::gpt-5.5-mini` or `anthropic::claude-opus-4-6` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
-- **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Onboarding can choose the initial boot baseline before the agent starts. After launch, the Settings control is interactive only in desktop builds: `web/modules/settings.js` calls the pywebview launcher bridge `request_runtime_mode_change`, the launcher shows a native confirmation dialog, and the launcher saves the new mode with `allow_elevation=True`; the change is reported as restart-required. Web/Docker sessions can view the current mode but cannot elevate it through `/api/settings`. The normal HTTP save path still omits/drops `OUROBOROS_RUNTIME_MODE`, and `ouroboros/config.py::save_settings` plus the boot-baseline pin, `_data_write` settings.json block, shell filters, and Files API guard remain the self-elevation defenses. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on the read path (`get_runtime_mode`) so unknown values can never drift into `/api/state`.
+- **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Onboarding can choose the initial boot baseline before the agent starts. After launch, the Settings control is read-only — sessions can view the current mode but cannot elevate it through `/api/settings`. Elevation requires the operator to stop the process, edit `settings.json` directly (or set the env var), and restart. The normal HTTP save path omits/drops `OUROBOROS_RUNTIME_MODE`, and `ouroboros/config.py::save_settings` plus the boot-baseline pin, `_data_write` settings.json block, shell filters, and Files API guard are the self-elevation defenses. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on the read path (`get_runtime_mode`) so unknown values can never drift into `/api/state`.
 - **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. v5 changed the discovery model: the primary location is now the in-data-plane tree `data/skills/{native,clawhub,external}/`, and `OUROBOROS_SKILLS_REPO_PATH` is an OPTIONAL extra discovery root for users who keep skills in their own checkout. The skill loader walks all three buckets + the optional path, tagging each `LoadedSkill` with `source` (`native`/`clawhub`/`external`/`user_repo`); `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle, and the Skills page exposes the same direct review/toggle flow plus a Marketplace sub-tab for ClawHub installs. Absolute path or `~`-prefixed; empty means "use only the data plane". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
-- **ClawHub Marketplace**: always-on Marketplace sub-tab backed by `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). The old `OUROBOROS_CLAWHUB_ENABLED` key is ignored when present in legacy settings and is no longer part of defaults or env propagation. Browse uses `/packages?family=skill`; text search uses `/search?q=&limit=16` (full-index relevance ranking, single-page) and enriches thin hits through a merged `/packages/<slug>` + `/skills/<slug>` detail lookup to recover stats, official badges, license, and homepage metadata. The Official-only checkbox is clickable in both modes: browse forwards `isOfficial=true` to the catalogue, while text search applies it after enrichment because `/search` has no official filter parameter. Registry reads and downloads retry bounded 429 responses with `Retry-After` when present; persistent rate limits surface as a human-readable "try again later" state with a retry affordance instead of a raw HTTP 429. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. v5.4.0 adds a card-level lifecycle CTA: install auto-runs review, then the card offers Enable only after a fresh PASS review and any required grants; otherwise the same card becomes Fix / Grant / Enable / Open widgets / Disable / Uninstall. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Core settings keys (`OPENROUTER_API_KEY` etc.) requested by OpenClaw `requires.env` become per-skill grant requirements and are forwarded only after fresh PASS review plus desktop-launcher owner grant; this is a trust-local model with `_data_write`, Files API, and `run_shell` owner-state defenses rather than an OS-level same-user sandbox.
+- **ClawHub Marketplace**: always-on Marketplace sub-tab backed by `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). The old `OUROBOROS_CLAWHUB_ENABLED` key is ignored when present in legacy settings and is no longer part of defaults or env propagation. Browse uses `/packages?family=skill`; text search uses `/search?q=&limit=16` (full-index relevance ranking, single-page) and enriches thin hits through a merged `/packages/<slug>` + `/skills/<slug>` detail lookup to recover stats, official badges, license, and homepage metadata. The Official-only checkbox is clickable in both modes: browse forwards `isOfficial=true` to the catalogue, while text search applies it after enrichment because `/search` has no official filter parameter. Registry reads and downloads retry bounded 429 responses with `Retry-After` when present; persistent rate limits surface as a human-readable "try again later" state with a retry affordance instead of a raw HTTP 429. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. v5.4.0 adds a card-level lifecycle CTA: install auto-runs review, then the card offers Enable only after a fresh PASS review and any required grants; otherwise the same card becomes Fix / Grant / Enable / Open widgets / Disable / Uninstall. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Core settings keys (`OPENROUTER_API_KEY` etc.) requested by OpenClaw `requires.env` become per-skill grant requirements and are forwarded only after fresh PASS review plus an explicit owner grant written out-of-band; this is a trust-local model with `_data_write`, Files API, and `run_shell` owner-state defenses rather than an OS-level same-user sandbox.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap live in **Dashboard → Costs**.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
@@ -495,9 +518,9 @@ See section 3.8 (Evolution) for the combined page.
 
 ### 3.9 Dashboard → Updates
 
-- **Official update card**: shows current version/SHA, latest official remote SHA/message, dirty/ahead/behind state, and an explicit **Check for updates** action. Passive status reads are strictly read-only: they do not fetch, create remotes, rewrite remote URLs, or otherwise mutate `.git`. Manual Check may normalize/fetch the launcher-managed `managed` remote, which points to the hardcoded official repo `https://github.com/joi-lab/ouroboros-desktop`. Source-mode checkouts without launcher-managed metadata report managed updates as unavailable rather than pretending an `origin` pull can be applied by the launcher restart path.
+- **Official update card**: shows current version/SHA, latest official remote SHA/message, dirty/ahead/behind state, and an explicit **Check for updates** action. Passive status reads are strictly read-only: they do not fetch, create remotes, rewrite remote URLs, or otherwise mutate `.git`. Manual Check may normalize/fetch the `managed` remote, which points to the hardcoded official repo `https://github.com/joi-lab/ouroboros-desktop`. Source-mode checkouts without managed-remote metadata report managed updates as unavailable rather than pretending an `origin` pull can be applied by the restart path.
 - **Official releases vs local recovery**: official tags come from the official managed remote. Local commits/tags remain visible only in the Local Recovery area and are labelled as recovery/developer refs, not official releases.
-- **Update Now / Update with Options** → POST `/api/update/apply`. Safe clean updates are one-click. Divergent/dirty worktrees show an explicit confirmation; the backend always writes a rescue snapshot first, preserves ahead commits on a `local-keep-*` branch before any official reset, and writes a one-shot update-intent marker pinned to the exact target SHA before restart. The current process may pre-checkout that SHA before exiting so the launcher starts the updated `server.py`, but the marker is intentionally kept until post-restart bootstrap; `checkout_and_reset` consumes and clears it only there so the restarted process applies the commit the user approved, not a later moving branch tip. Ordinary restarts without an update intent never reset the active local branch to `managed/<branch>`.
+- **Update Now / Update with Options** → POST `/api/update/apply`. Safe clean updates are one-click. Divergent/dirty worktrees show an explicit confirmation; the backend always writes a rescue snapshot first, preserves ahead commits on a `local-keep-*` branch before any official reset, and writes a one-shot update-intent marker pinned to the exact target SHA before restart. The current process may pre-checkout that SHA before exiting via `RESTART_EXIT_CODE = 42` so the supervising process manager (systemd / Docker `--restart=on-failure` / k8s) brings the updated `server.py` back up; the marker is intentionally kept until post-restart bootstrap. `checkout_and_reset` consumes and clears it only there so the restarted process applies the commit the user approved, not a later moving branch tip. Ordinary restarts without an update intent never reset the active local branch to `managed/<branch>`.
 - **Current branch + SHA** displayed at top.
 - **Recent Commits** list with SHA, date, message, and "Restore" button.
 - **Tags** list with tag name, date, message, and "Restore" button.
@@ -548,8 +571,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh PASS review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
 | GET | `/api/skills/lifecycle-queue` | v5.5: recent global FIFO skill lifecycle jobs (install/update/review/deps/enable/disable/uninstall) for My skills virtual rows, tab badges, and operator feedback. |
 | POST | `/api/skills/{skill}/review` | Phase 5 / v5.7.2: UI-direct tri-model review trigger. Uses the shared `skill_review_runner` lifecycle job path, offloads blocking LLM calls to a worker thread, dedupes active reviews by skill/content hash, reconciles isolated dependencies after PASS, and writes `review_job.json` + `skill_review_*` events. |
-| POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation. v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
-| POST | `/api/skills/{skill}/reconcile` | Reload/unload the live extension state after owner key grants or catalogue changes; used by launcher/UI flows to make persisted skill state match runtime registrations. |
+| POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and must be written out-of-band (operator stops the agent, edits `data/state/skills/<name>/grants.json`, restarts). v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
+| POST | `/api/skills/{skill}/reconcile` | Reload/unload the live extension state after owner key grants or catalogue changes; makes persisted skill state match runtime registrations. |
 | GET | `/api/migrations` | List native-skill upgrade notices shown on the Skills page. |
 | POST | `/api/migrations/{key}/dismiss` | Mark a native-skill upgrade notice as seen so the Skills page stops surfacing it. |
 | GET | `/api/files/list` | Directory listing for Files tab root/path |
@@ -585,7 +608,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/git/rollback` | Rollback to a specific commit/tag `{target: "sha"}` |
 | POST | `/api/git/promote` | Promote ouroboros → ouroboros-stable |
 | GET | `/api/update/status` | Passive managed-update status: current SHA/version, dirty state, and whether a check is needed. Does not fetch or mutate `.git` / remotes. |
-| POST | `/api/update/check` | Ensure/fetch the official launcher-managed remote and return fresh latest SHA/version, divergence, and safety status. |
+| POST | `/api/update/check` | Ensure/fetch the official `managed` remote and return fresh latest SHA/version, divergence, and safety status. |
 | POST | `/api/update/apply` | Prepare a managed update, writing a rescue snapshot first and preserving local ahead commits on `local-keep-*`; then request restart so `safe_restart` applies the pinned update-intent SHA. |
 | GET | `/api/cost-breakdown` | Cost dashboard aggregation by model/key/category |
 | POST | `/api/local-model/start` | Start/download local model server |
@@ -801,8 +824,8 @@ runtime authority.
 - **Runtime resolver** (`ouroboros.platform_layer.resolve_claude_runtime`): deterministic
   snapshot of SDK version, CLI path/version, app-managed vs legacy status, API key
   readiness. Used by the status API, install/repair endpoint, and gateway diagnostics.
-- **Legacy detection**: SDK installed outside `python-standalone` (e.g. user-site in
-  `~/.local/lib`) is classified as legacy and silently de-prioritized.
+- **Legacy detection**: SDK installed outside the active interpreter's `site-packages`
+  (e.g. user-site in `~/.local/lib`) is classified as legacy and silently de-prioritized.
 - **Two execution modes:**
   - **Edit mode** (`run_edit`): `allowed_tools=["Read","Edit","Grep","Glob"]`,
     `disallowed_tools=["Bash","MultiEdit"]`, `permission_mode="acceptEdits"`,
@@ -1675,7 +1698,7 @@ to `~/Ouroboros/data/archive/rescue/` before reset/clean.
 
 ## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
 
-Four-tier GitHub Actions workflow:
+GitHub Actions tiers (no desktop bundle build — there is no PyInstaller release pipeline anymore):
 
 | Tier | Trigger | What runs | Time |
 |------|---------|-----------|------|
@@ -1683,49 +1706,11 @@ Four-tier GitHub Actions workflow:
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
 | Integration | Push to `main`, `ouroboros`, or `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Ubuntu-only: `pytest tests/test_provider_integration.py -m integration` against real OpenRouter / OpenAI / Anthropic / Cloud.ru keys (skipped per-provider when its key is unset) | ~2 min |
 | UI smoke | Manual (`workflow_dispatch`) or tag `v*` | Host-side Playwright UI smoke plus real Chromium browser-tool smoke (`browser`, `ui_browser`) with collect-only marker guards | ~5 min |
-| Docker smoke | Manual (`workflow_dispatch`) or tag `v*` | Build `ouroboros-web:test`, run Docker UI smoke (`ui_browser_docker`), and run `portable_detail` tests inside the container | ~10 min |
-| Build + Release | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` (macOS optionally codesigned + notarized when Apple secrets are configured) + GitHub Release | ~15 min |
+| Docker smoke | Manual (`workflow_dispatch`) or tag `v*` | Build `ouroboros-web:test`, run UI smoke against the container | ~10 min |
 
-Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `launcher.py`,
-`tests/**`, `web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
-`build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `scripts/**`, `VERSION`, `README.md`.
-Tag pushes (`v*`) always fire regardless of paths.
-
-**macOS code signing & notarization (Build tier).** When the build job has access to
-`BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`, and `APPLE_TEAM_ID` as
-GitHub Actions repository secrets, the build job creates a temporary keychain, imports
-the Developer ID certificate, and runs `bash build.sh` (which then signs the `.app` and
-the `.dmg`); when `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` are also present,
-`build.sh` additionally runs `xcrun notarytool submit ... --wait` followed by
-`xcrun stapler staple` to staple the notarization ticket to the DMG. A transient
-stapler failure (Apple CDN propagation lag) after a successful notarytool submission
-is treated as a soft warning — the DMG is genuinely notarized and Gatekeeper validates
-it online; without that guard `set -e` would abort the build and silently drop the
-macOS artifact from the release. A `notarytool submit` failure (Apple-side outage,
-wrong credential) is handled the same way — the DMG ships signed-but-not-notarized
-with a clear `WARNING` log line rather than aborting, so an Apple outage never
-silently removes the macOS artifact from the GitHub Release. The four observable
-notarization outcomes (`success` / `staple_failed` / `submit_failed` / `unconfigured`)
-each render a distinct summary line at the end of the build, plus a defensive
-`Unknown notarization outcome` arm so future enum drift is loud rather than silent. With no Apple secrets configured, the macOS build
-falls back to the unsigned path (`OUROBOROS_SIGN=0 bash build.sh`) — users still need
-right-click → **Open** on first launch. Forks enable signing by configuring all four
-required secrets above; `SIGN_IDENTITY` is an additional optional secret for forks
-whose Developer ID differs from the upstream default. **The signing secrets are mapped
-at the build job's `env:` block, not at step level, because GitHub Actions rejects
-`secrets.*` references inside step-level `if:` expressions ("Unrecognized named-value:
-'secrets'") — step `if:` conditions read `env.*` instead.** Each mapping is additionally
-guarded by `${{ matrix.os == 'macos-latest' && secrets.X || '' }}` so the Apple
-credentials are scoped to the macOS matrix shard only — Linux and Windows sibling
-shards (which run `build_linux.sh` / `build_windows.ps1`, neither of which needs Apple
-creds) receive empty strings, so the signing material is never exposed to non-macOS
-build subprocesses. A `Cleanup keychain` step with
-`if: always() && matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != ''`
-deletes the temporary keychain regardless of build outcome — the `matrix.os` gate keeps
-the bash-only `security` invocation off Linux/Windows shards, and the env guard skips
-when no keychain was ever created. Signing material never persists on the runner. See
-`docs/DEVELOPMENT.md::GitHub Actions: secrets in step-level if conditions` for the
-rationale.
+Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
+`web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `Dockerfile`,
+`scripts/**`, `VERSION`, `README.md`. Tag pushes (`v*`) always fire regardless of paths.
 
 **Integration tier credentials.** The integration job consumes
 `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY` from repository secrets
@@ -1740,86 +1725,6 @@ with `pytest -m integration` (the whole file) or
 `-m integration` is **deselected** by `addopts -m 'not integration'` and exits 5
 ("no tests collected"); use the explicit `-m integration` form, or override the
 default with `pytest -o addopts='' tests/test_provider_integration.py::test_X`.
-
-### Build scripts
-
-| Script | Platform | Output |
-|--------|----------|--------|
-| `build.sh` | macOS | `dist/Ouroboros-{VERSION}.dmg` (optional signing + notarization) |
-| `build_linux.sh` | Linux | `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz` |
-| `build_windows.ps1` | Windows | `dist/Ouroboros-<VERSION>-windows-x64.zip` |
-
-**Release tag prerequisite (all scripts).** Before running PyInstaller, every
-build script now verifies both that `refs/tags/v$(cat VERSION)` exists and
-that `git tag --points-at HEAD` reports that same tag. A missing or
-unmatched tag aborts the build with a hard error. This keeps the embedded
-`repo_bundle_manifest.json` honest: the `release_tag` it stores is always
-a real annotated tag that actually points at the packaged commit, so the
-launcher-side bundle verification (see §1 `scripts/build_repo_bundle.py`
-and the bundle-manifest schema) can trust that field. Operators tag the
-release first (`git tag -a v$(cat VERSION) -m …`) and then run the
-platform script.
-
-All three use PyInstaller with `launcher.py` as the packaged entry point (which spawns
-`server.py` as a subprocess). Hidden imports are limited to `webview` and `ouroboros.config`
-(plus Windows-only `pythonnet`/`clr_loader`); the full agent runtime — starlette, uvicorn,
-websockets, dulwich, huggingface_hub, and the rest — ships via the bundled `python-standalone`
-data tree and is resolved at runtime by the embedded interpreter. Data bundles include
-`ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `tests/`,
-`server.py`, `launcher.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
-`requirements.txt`, `requirements-launcher.txt`, `.gitignore`, `repo.bundle`,
-`repo_bundle_manifest.json`, and `python-standalone/` (the embedded
-Python runtime that carries all agent dependencies — and the bundled
-Playwright browser payload installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install ... chromium`
-before PyInstaller runs; see *Bundled Chromium* paragraph below).
-
-**Bundled Chromium / headless shell (build scripts v4.40.2+; runtime detection v4.40.3+):**
-Each build script installs its Playwright browser payload inside `python-standalone`
-with `PLAYWRIGHT_BROWSERS_PATH` set to `0`, **before** PyInstaller packages the app.
-This stores the browser payload inside the playwright package directory
-(`driver/package/.local-browsers/`), which is already part of the `python-standalone`
-data tree bundled by PyInstaller. macOS now bundles **only the Chromium headless shell**
-because the full nested Chrome app bundle trips PyInstaller's macOS codesign path.
-Windows also bundles only the headless shell from v5.8 onward so the release zip stays
-below Explorer's MAX_PATH extraction limit. Linux still bundles the regular Chromium
-payload. The exact shell syntax differs:
-
-- macOS (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium`
-- Linux (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium`
-- Windows (PowerShell): `$env:PLAYWRIGHT_BROWSERS_PATH = "0"; python-standalone\python.exe -m playwright install --only-shell chromium`
-
-At runtime, `ouroboros/tools/browser.py::_set_playwright_browsers_path_if_bundled()`
-runs at module import time. It sets `PLAYWRIGHT_BROWSERS_PATH=0` **only** when
-`_has_platform_chromium(local_browsers)` returns `True` — meaning the
-`driver/package/.local-browsers/` directory inside the playwright package contains a
-platform-matching browser payload with a real executable. Accepted layouts include the
-regular Chromium tree (`chromium-*` with `chrome-mac-*`, `chrome-linux*`, `chrome-win*`)
-and the headless-shell tree (`chromium_headless_shell-*` with
-`chrome-headless-shell-{mac,linux,win}-*`). This two-level check prevents false positives
-from foreign-platform payloads or partial downloads. Source/dev installs that already
-have Chromium in `~/.cache/ms-playwright/` are unaffected — they never trigger the check
-and continue using the standard cache path. If the environment variable is already set
-explicitly, it is always respected. The result: browser tools (`browse_page`,
-`browser_action`, `analyze_screenshot`) still work out of the box in packaged builds
-with no additional download. **Linux caveat:** the Chromium binary is bundled, but some Linux hosts may
-still need native system libraries if those are not already present. The bundled
-Playwright CLI is inside the app archive, so use the bundled Python to install deps:
-```
-./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium
-```
-Alternatively install the equivalent distro packages directly
-(`libnss3`, `libatk-bridge2.0-0`, `libdrm2`, etc.). This is a host OS dependency,
-not a bundle issue — the bare `playwright` CLI command is not on PATH in packaged
-installs.
-
-Windows builds run an additional path-length guard after PyInstaller and before
-`Compress-Archive`: any path longer than 200 characters relative to `dist\Ouroboros`
-fails the build, leaving headroom for the user-selected extraction folder so plain
-Explorer **Extract All** succeeds without requiring 7-Zip or long-path registry changes.
-Before packaging, `build_windows.ps1` prunes optional Chromium headless-shell resources
-known to exceed that budget (`PrivacySandboxAttestationsPreloaded` and the reading-mode
-Google Docs accessibility helper). Browser tools do not depend on those optional files,
-and the pruning keeps the release zip compatible with Explorer extraction.
 
 ### Docker (`Dockerfile`)
 
@@ -1839,27 +1744,26 @@ additional setup or first-run download.
 
 ## 9. Shutdown & Process Cleanup
 
-**Requirement: closing the window (X button or Cmd+Q) MUST leave zero orphan
-processes. No zombies, no workers lingering in background.**
+**Requirement: stopping the server (Ctrl-C, SIGTERM from systemd/Docker/k8s)
+MUST leave zero orphan processes. No zombies, no workers lingering in background.**
 
-### 9.1 Normal Shutdown (window close)
+### 9.1 Normal Shutdown (SIGTERM)
 
 ```
-1. _shutdown_event.set()           ← signal lifecycle loop to exit
-2. stop_agent()
-   a. SIGTERM → server.py          ← server runs its lifespan shutdown:
-      │                                kill_workers(force=True) → SIGTERM+SIGKILL all workers
-      │                                then server exits cleanly
-   b. wait 10s for exit
-   c. if still alive → SIGKILL     ← hard kill (workers may orphan)
-3. _kill_orphaned_children()        ← SAFETY NET
-   a. _kill_stale_on_port(8765)    ← lsof port, SIGKILL any survivors
-   b. multiprocessing.active_children() → SIGKILL each
-4. release_pid_lock()               ← delete ~/Ouroboros/ouroboros.pid
+1. uvicorn receives SIGTERM        ← from systemd/docker stop/k8s pod terminate
+2. ASGI lifespan shutdown event runs:
+   a. supervisor.kill_workers(force=True) → SIGTERM+SIGKILL all multiprocessing workers
+   b. ouroboros/git_sync.shutdown_push() → best-effort push under bounded budget
+   c. local model server stop (if running)
+3. uvicorn closes listening socket and exits
+4. OS process-group teardown reaps any remaining children
 ```
 
-This three-layer approach (graceful → force-kill server → sweep port/children)
-guarantees no orphans even if the server hangs or workers resist SIGTERM.
+Workers are spawned with `start_new_session=True` and tracked in a thread-safe
+global set, so panic / shutdown / timeout paths can `os.killpg(pgid, SIGKILL)`
+the entire subprocess tree. There are no PID lock files to release — single-instance
+guarantees are now the responsibility of the supervising process manager
+(systemd unit, Docker container, k8s pod).
 
 ### 9.2 Panic Stop (`/panic` command or Panic Stop button)
 
@@ -1879,14 +1783,21 @@ The panic sequence (in `server.py:_execute_panic_stop()`):
 7. os._exit(99)                      ← immediate hard exit, kills daemon threads
 ```
 
-Launcher handles exit code 99:
+After `os._exit(99)` the process exits with `PANIC_EXIT_CODE`. The supervising
+process manager handles the rest:
 
-```
-7. Launcher detects exit_code == PANIC_EXIT_CODE (99)
-8. _shutdown_event.set()
-9. Kill orphaned children (port sweep + multiprocessing sweep)
-10. _webview_window.destroy()        ← closes PyWebView, app exits
-```
+- **systemd** with `Restart=on-failure` + `RestartPreventExitStatus=99` does NOT
+  restart on panic (operator-driven recovery).
+- **Docker** with `--restart=on-failure` will restart unless the operator runs
+  with `--restart=no` or stops the container.
+- **k8s** pod `restartPolicy: OnFailure` will restart on exit 99 by default; pin
+  panic-no-restart by raising the `livenessProbe`/`startupProbe` floor or using
+  a Job with `backoffLimit: 0`.
+
+In all cases, `os._exit()` kills daemon threads immediately, so any orphaned
+child processes are cleaned up by the OS process group teardown plus the
+supervisor's panic sequence (subprocess process-group kills, port sweep) that
+ran before the exit call.
 
 On next manual launch:
 
@@ -1921,17 +1832,16 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 2. **Release carriers stay in sync**: `VERSION`, the README badge, the ARCHITECTURE header,
    and the latest release git tag use the same author-facing spelling (for example
    `4.50.0-rc.2` / `v4.50.0-rc.2`), while `pyproject.toml` stores the PEP 440-canonical form
-   (for example `4.50.0rc2`). For packaged builds, `repo_bundle_manifest.json` pins that same
-   release via `app_version`, `release_tag`, `source_sha`, and the embedded bundle hash for the
-   first launcher-managed bootstrap before normal managed-remote updates resume.
+   (for example `4.50.0rc2`).
 3. **Config SSOT**: all settings defaults and paths live in `ouroboros/config.py`
 4. **Message bus SSOT**: all messaging goes through `supervisor/message_bus.py`
 5. **State locking**: `state.json` uses file locks for concurrent read-modify-write
 6. **Budget tracking**: per-LLM-call cost events with model/key/category breakdown
-7. **Launcher-managed repo bootstrap**: packaged builds bootstrap from the manifest-pinned
-   `repo.bundle` once, then continue from the managed git checkout. Ordinary
-   restarts preserve the local branch tip; explicit Update Now is the only
-   path that resets the active branch to a user-approved official SHA.
+7. **REPO_DIR is supplied externally**: a usable git checkout MUST exist at
+   `REPO_DIR` before `server.py` starts. `ensure_repo_present()` raises
+   `SystemExit` otherwise. Ordinary restarts preserve the local branch tip;
+   explicit Update Now is the only path that resets the active branch to a
+   user-approved official SHA.
 8. **Zero orphans on close**: shutdown MUST kill all child processes (see Section 9)
 9. **Panic MUST kill everything**: all processes (workers, subprocesses, subprocess
    trees, consciousness, evolution) are killed and the application exits completely.
@@ -2053,7 +1963,7 @@ Each <skill_name>/ contains:
 
 Ouroboros bootstrap-copies its shipped seed (``repo/skills/``) into
 ``data/skills/native/`` exactly once on first launch
-(``launcher_bootstrap.ensure_data_skills_seeded``). After that the
+(``ouroboros.skill_loader.ensure_data_skills_seeded``). After that the
 data plane is the source of truth — the user can edit, delete, or add
 skill packages freely without dirtying the managed git repo. Skills
 are discovered via ``ouroboros.skill_loader.discover_skills`` which
@@ -2063,7 +1973,7 @@ walks the data plane plus the optional external checkout, tagging each
 
 v5.8 adds a topology repair migration:
 ``skill_migrations.migrate_unseeded_native_skills_to_external`` moves any
-``data/skills/native/<skill>/`` directory that lacks the launcher-written
+``data/skills/native/<skill>/`` directory that lacks the seed-loader-written
 ``.seed-origin`` marker into ``data/skills/external/``. This keeps the
 honesty rule ("unmarked native is user-managed external") aligned with the
 Repair guard, which intentionally only grants payload writes under
@@ -2091,7 +2001,8 @@ scratch data. Agent-write surfaces (`data_write`, Files API mutations,
 and `run_shell` post-execution owner-state restore) protect
 `enabled.json`, `review.json`, `grants.json`, and `clawhub.json`; payload
 repair happens under `data/skills/...` and must flow back through
-`review_skill`, Skills UI enablement, and the launcher grant bridge.
+`review_skill`, Skills UI enablement, and the out-of-band owner grant path
+(operator edits `data/state/skills/<name>/grants.json` directly).
 
 Declared dependencies share one install/readiness contract. ClawHub
 provenance, OuroborosHub sidecars/catalog metadata, and reviewed manifest
@@ -2331,8 +2242,9 @@ Defense in depth against reviewer misses:
 - ``PluginAPI.get_settings`` intersects the skill's manifest
   ``env_from_settings`` with ``FORBIDDEN_EXTENSION_SETTINGS`` and
   drops those core credential keys unless the owner has explicitly
-  granted them through the desktop launcher's native confirmation
-  bridge. v5.2.2 introduced **dual-track grants**: ``type: script``
+  granted them out-of-band (operator edits
+  ``data/state/skills/<name>/grants.json`` directly while the agent
+  is stopped). v5.2.2 introduced **dual-track grants**: ``type: script``
   skills receive granted core keys via ``_scrub_env`` for their
   out-of-process subprocess, and ``type: extension`` skills receive
   them via ``PluginAPIImpl.get_settings`` for their in-process plugin

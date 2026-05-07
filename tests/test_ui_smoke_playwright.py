@@ -241,7 +241,7 @@ def test_ui_smoke_direct_mode_chat_scrolls_on_desktop(direct_server):
         raise
 
 
-@pytest.mark.ui_browser_docker
+@pytest.mark.docker
 def test_ui_smoke_docker_mode_loads_health():
     if os.environ.get("OUROBOROS_RUN_DOCKER_UI_SMOKE") != "1":
         pytest.skip("set OUROBOROS_RUN_DOCKER_UI_SMOKE=1 to run Docker UI smoke")

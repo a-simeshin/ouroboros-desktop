@@ -14,7 +14,7 @@ import platform
 import signal
 import subprocess
 import sys
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -44,18 +44,6 @@ def is_container_env() -> bool:
     if IS_LINUX and pathlib.Path("/.dockerenv").exists():
         return True
     return False
-
-
-def open_path_external(path: pathlib.Path) -> None:
-    """Open a local path with the platform default application."""
-
-    target = pathlib.Path(path)
-    if IS_MACOS:
-        subprocess.Popen(["open", str(target)])
-    elif IS_WINDOWS:
-        os.startfile(str(target))  # type: ignore[attr-defined]
-    else:
-        subprocess.Popen(["xdg-open", str(target)])
 
 
 def _hidden_run(command: list[str], **kwargs):
@@ -229,8 +217,8 @@ def _win32_overlapped_class():
 def _win32_lock(fd: int, *, exclusive: bool = True, blocking: bool = True) -> None:
     """Lock a file descriptor using Win32 LockFileEx. Works on empty files."""
     import ctypes
-    from ctypes import wintypes
     import msvcrt as _msvcrt
+    from ctypes import wintypes
 
     _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
     _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
@@ -420,39 +408,10 @@ def kill_process_on_port(port: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Embedded Python paths
-# ---------------------------------------------------------------------------
-
-def embedded_python_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
-    """Return candidate paths for the embedded python-build-standalone interpreter."""
-    if IS_WINDOWS:
-        return [
-            base_dir / "python-standalone" / "python.exe",
-            base_dir / "python-standalone" / "python3.exe",
-        ]
-    return [
-        base_dir / "python-standalone" / "bin" / "python3",
-        base_dir / "python-standalone" / "bin" / "python",
-    ]
-
-
-def embedded_pip(base_dir: pathlib.Path) -> Optional[pathlib.Path]:
-    """Return path to pip inside embedded python-standalone."""
-    if IS_WINDOWS:
-        p = base_dir / "python-standalone" / "Scripts" / "pip3.exe"
-        if p.exists():
-            return p
-        p = base_dir / "python-standalone" / "Scripts" / "pip.exe"
-        return p if p.exists() else None
-    p = base_dir / "python-standalone" / "bin" / "pip3"
-    return p if p.exists() else None
-
-
-# ---------------------------------------------------------------------------
 # Claude Runtime Resolution
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass
+from dataclasses import dataclass  # noqa: E402
 
 
 @dataclass
@@ -618,7 +577,7 @@ def resolve_claude_runtime() -> ClaudeRuntimeState:
     sdk_version_ok = False
     if state.sdk_version:
         try:
-            from ouroboros.launcher_bootstrap import _CLAUDE_SDK_MIN_VERSION, _version_tuple
+            from ouroboros.claude_runtime import _CLAUDE_SDK_MIN_VERSION, _version_tuple
             sdk_version_ok = _version_tuple(state.sdk_version) >= _version_tuple(_CLAUDE_SDK_MIN_VERSION)
         except Exception:
             # Fail-closed: if the baseline cannot be resolved, treat as not-ready
@@ -629,7 +588,7 @@ def resolve_claude_runtime() -> ClaudeRuntimeState:
     )
     if state.sdk_version and not sdk_version_ok and not state.error:
         try:
-            from ouroboros.launcher_bootstrap import _CLAUDE_SDK_MIN_VERSION
+            from ouroboros.claude_runtime import _CLAUDE_SDK_MIN_VERSION
             state.error = (
                 f"Claude SDK {state.sdk_version} is below baseline {_CLAUDE_SDK_MIN_VERSION}. "
                 "Run Repair to upgrade."
@@ -765,160 +724,3 @@ def merge_hidden_kwargs(kwargs: dict) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Git installation hint
-# ---------------------------------------------------------------------------
-
-def git_install_hint() -> str:
-    """Return platform-appropriate instructions for installing Git."""
-    if IS_MACOS:
-        return "Install Git via Xcode CLI Tools: xcode-select --install"
-    elif IS_WINDOWS:
-        return "Download Git from https://git-scm.com/download/win or run: winget install Git.Git"
-    else:
-        return "Install Git via your package manager, e.g.: sudo apt install git"
-
-
-# ---------------------------------------------------------------------------
-# Windows Job Object helpers
-# ---------------------------------------------------------------------------
-
-if IS_WINDOWS:
-    import ctypes
-    import ctypes.wintypes
-
-    _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-
-    _INVALID_HANDLE_VALUE = ctypes.wintypes.HANDLE(-1)
-    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-    _JOBOBJECTINFOCLASS_EXTENDED = 9
-    _PROCESS_SET_QUOTA = 0x0100
-    _PROCESS_TERMINATE = 0x0001
-    _PROCESS_SUSPEND_RESUME = 0x0800
-    _CREATE_SUSPENDED = 0x4
-
-    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", ctypes.c_int64),
-            ("PerJobUserTimeLimit", ctypes.c_int64),
-            ("LimitFlags", ctypes.wintypes.DWORD),
-            ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", ctypes.wintypes.DWORD),
-            ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
-            ("PriorityClass", ctypes.wintypes.DWORD),
-            ("SchedulingClass", ctypes.wintypes.DWORD),
-        ]
-
-    class _IO_COUNTERS(ctypes.Structure):
-        _fields_ = [
-            ("ReadOperationCount", ctypes.c_uint64),
-            ("WriteOperationCount", ctypes.c_uint64),
-            ("OtherOperationCount", ctypes.c_uint64),
-            ("ReadTransferCount", ctypes.c_uint64),
-            ("WriteTransferCount", ctypes.c_uint64),
-            ("OtherTransferCount", ctypes.c_uint64),
-        ]
-
-    class _ExtendedLimitInfo(ctypes.Structure):
-        _fields_ = [
-            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
-            ("IoInfo", _IO_COUNTERS),
-            ("ProcessMemoryLimit", ctypes.c_size_t),
-            ("JobMemoryLimit", ctypes.c_size_t),
-            ("PeakProcessMemoryUsed", ctypes.c_size_t),
-            ("PeakJobMemoryUsed", ctypes.c_size_t),
-        ]
-
-
-def create_kill_on_close_job() -> Optional[Any]:
-    """Create a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
-
-    Returns the job handle (int), or None on non-Windows / failure.
-    """
-    if not IS_WINDOWS:
-        return None
-    try:
-        handle = _kernel32.CreateJobObjectW(None, None)
-        if handle in (0, _INVALID_HANDLE_VALUE):
-            log.warning("CreateJobObjectW failed")
-            return None
-        info = _ExtendedLimitInfo()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        ok = _kernel32.SetInformationJobObject(
-            handle,
-            _JOBOBJECTINFOCLASS_EXTENDED,
-            ctypes.byref(info),
-            ctypes.sizeof(info),
-        )
-        if not ok:
-            log.warning("SetInformationJobObject failed")
-            _kernel32.CloseHandle(handle)
-            return None
-        return handle
-    except Exception as exc:
-        log.warning("Job Object creation failed: %s", exc)
-        return None
-
-
-def assign_pid_to_job(job_handle: Any, pid: int) -> bool:
-    """Assign a running process (by PID) to a Job Object. Windows only."""
-    if not IS_WINDOWS or job_handle is None:
-        return False
-    try:
-        proc_handle = _kernel32.OpenProcess(
-            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid,
-        )
-        if not proc_handle:
-            log.warning("OpenProcess(%d) failed for Job Object assignment", pid)
-            return False
-        ok = _kernel32.AssignProcessToJobObject(job_handle, proc_handle)
-        _kernel32.CloseHandle(proc_handle)
-        if not ok:
-            log.warning("AssignProcessToJobObject failed for pid %d", pid)
-            return False
-        return True
-    except Exception as exc:
-        log.warning("Job Object assign failed: %s", exc)
-        return False
-
-
-def terminate_job(job_handle: Any, exit_code: int = 1) -> None:
-    """Terminate all processes in a Job Object."""
-    if not IS_WINDOWS or job_handle is None:
-        return
-    try:
-        _kernel32.TerminateJobObject(job_handle, exit_code)
-    except Exception:
-        pass
-
-
-def close_job(job_handle: Any) -> None:
-    """Close a Job Object handle (triggers kill-on-close if set)."""
-    if not IS_WINDOWS or job_handle is None:
-        return
-    try:
-        _kernel32.CloseHandle(job_handle)
-    except Exception:
-        pass
-
-
-def resume_process(pid: int) -> bool:
-    """Resume all threads of a suspended process. Windows only."""
-    if not IS_WINDOWS:
-        return False
-    try:
-        _ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
-        handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
-        if not handle:
-            log.warning("OpenProcess(%d) failed for resume", pid)
-            return False
-        status = _ntdll.NtResumeProcess(handle)
-        _kernel32.CloseHandle(handle)
-        if status != 0:
-            log.warning("NtResumeProcess(%d) returned NTSTATUS 0x%08x", pid, status)
-            return False
-        return True
-    except Exception as exc:
-        log.warning("resume_process failed: %s", exc)
-        return False

@@ -68,12 +68,10 @@ MAX_FUNCTION_LINES = 300
 # headroom (extension loader, Widget ABI, pro-mode auto-PR).
 # v4.50.0-rc.5 raises ceiling 1350 → 1450: Phases 3–6 actually landed,
 # producing ~47 new helpers across ``extension_loader``,
-# ``extensions_api``, ``contracts/plugin_api``, ``launcher_bootstrap``,
-# ``onboarding_wizard``, and the new ``scripts/build_repo_bundle``
-# tag-verification helpers. Splitting further would require a refactor
-# larger than the pre-release scope; the ceiling bump stays consistent
-# with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
-# phase shipped.
+# ``extensions_api``, ``contracts/plugin_api``, and ``onboarding_wizard``.
+# Splitting further would require a refactor larger than the pre-release
+# scope; the ceiling bump stays consistent with how MAX_TOTAL_FUNCTIONS
+# has grown through v4.40→v4.47 as each phase shipped.
 MAX_TOTAL_FUNCTIONS = 2000  # v5.7.4: preserves headroom after managed-restart persistence and skill-review/UI growth; next broad structural pass should pay this down by extracting git/review/job-state helpers.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
@@ -91,10 +89,8 @@ MAX_TOTAL_FUNCTIONS = 2000  # v5.7.4: preserves headroom after managed-restart p
 # reviewed-commit staging, doc-only preflight, and dirty-tree checkout
 # pushed the file over the hard gate. This is accepted as short-lived debt;
 # split commit/review orchestration into a helper module in the next tools pass.
-GRANDFATHERED_OVERSIZED_MODULES = {"llm.py", "claude_advisory_review.py", "review_state.py", "server.py", "git.py"}
-# Immutable bundle-only entrypoints ship with release artifacts but should not
-# count against the self-editable codebase function budget.
-FUNCTION_COUNT_EXCLUDED_FILES = {"launcher.py"}
+GRANDFATHERED_OVERSIZED_MODULES = {"llm.py", "claude_advisory_review.py", "review_state.py", "server.py", "git.py", "skill_loader.py"}
+FUNCTION_COUNT_EXCLUDED_FILES: set[str] = set()
 
 
 # ---------------------------------------------------------------------------

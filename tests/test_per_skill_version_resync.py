@@ -30,7 +30,6 @@ from typing import Tuple
 
 import pytest
 
-
 SKILL_TEMPLATE = textwrap.dedent(
     """
     ---
@@ -82,7 +81,7 @@ def test_resync_skips_when_target_absent_after_user_deletion(staging, fake_log):
     the user deleted from native/. Only the first-time bootstrap may
     write a missing seed skill; resync exclusively upgrades existing.
     """
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_loader import _per_skill_version_resync
 
     seed_dir, native_root, drive_root = staging
     _write_skill(seed_dir, "weather", version="0.2.0")
@@ -102,7 +101,7 @@ def test_resync_skips_user_managed_skills_without_seed_origin(staging, fake_log)
     that happens to share a name with a seed skill but has no
     ``.seed-origin`` marker. The resync must not touch it.
     """
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_loader import _per_skill_version_resync
 
     seed_dir, native_root, drive_root = staging
     _write_skill(seed_dir, "weather", version="0.2.0")
@@ -131,7 +130,7 @@ def test_resync_reseeds_on_drift_and_wipes_in_skill_user_files(staging, fake_log
     wiped (native skills are launcher-owned). Files OUTSIDE under
     ``data/state/skills/<name>/`` are not touched (different plane).
     """
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_loader import _per_skill_version_resync
 
     seed_dir, native_root, drive_root = staging
     _write_skill(seed_dir, "weather", version="0.2.0")
@@ -167,7 +166,7 @@ def test_resync_writes_migration_record_on_drift(staging, fake_log):
     ``data/state/migrations.json`` so the Skills UI can render a
     one-shot banner explaining the change.
     """
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_loader import _per_skill_version_resync
 
     seed_dir, native_root, drive_root = staging
     _write_skill(seed_dir, "weather", version="0.2.0")
@@ -196,7 +195,7 @@ def test_resync_noop_on_identical_version(staging, fake_log):
     """Cycle 1 GPT-4(d) — same version on both sides means no upgrade
     fires and no migration record is written.
     """
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_loader import _per_skill_version_resync
 
     seed_dir, native_root, drive_root = staging
     _write_skill(seed_dir, "weather", version="0.2.0")
@@ -221,7 +220,7 @@ def test_resync_accepts_downgrade(staging, fake_log):
     Pin this to catch a future commit that adds a "seed_version >=
     target_version" guard.
     """
-    from ouroboros.launcher_bootstrap import _per_skill_version_resync
+    from ouroboros.skill_loader import _per_skill_version_resync
 
     seed_dir, native_root, drive_root = staging
     _write_skill(seed_dir, "weather", version="0.1.0")
@@ -240,7 +239,7 @@ def test_resync_accepts_downgrade(staging, fake_log):
 
 def test_read_version_strips_yaml_inline_comment(tmp_path):
     """Cycle 1 GPT-1 — `version: 0.2.0 # comment` must NOT include the comment."""
-    from ouroboros.launcher_bootstrap import _read_skill_manifest_version
+    from ouroboros.skill_loader import _read_skill_manifest_version
 
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -253,7 +252,7 @@ def test_read_version_strips_yaml_inline_comment(tmp_path):
 
 def test_read_version_handles_single_line_skill_json(tmp_path):
     """Cycle 1 GPT-2 — compact JSON `{"name":"foo","version":"0.2.0"}` must parse."""
-    from ouroboros.launcher_bootstrap import _read_skill_manifest_version
+    from ouroboros.skill_loader import _read_skill_manifest_version
 
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -267,7 +266,7 @@ def test_read_version_handles_single_line_skill_json(tmp_path):
 def test_read_version_ignores_pre_frontmatter_version_lines(tmp_path):
     """Cycle 1 GPT-3 — a body line ``version: ignore-me`` BEFORE the
     ``---`` frontmatter must not be returned."""
-    from ouroboros.launcher_bootstrap import _read_skill_manifest_version
+    from ouroboros.skill_loader import _read_skill_manifest_version
 
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -290,7 +289,7 @@ def test_read_version_returns_empty_for_malformed_manifest(tmp_path):
     """The helper must swallow parser exceptions so the resync pass
     just skips the upgrade for a malformed seed without taking down
     server startup."""
-    from ouroboros.launcher_bootstrap import _read_skill_manifest_version
+    from ouroboros.skill_loader import _read_skill_manifest_version
 
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -302,7 +301,7 @@ def test_read_version_returns_empty_for_malformed_manifest(tmp_path):
 
 
 def test_read_version_returns_empty_for_missing_files(tmp_path):
-    from ouroboros.launcher_bootstrap import _read_skill_manifest_version
+    from ouroboros.skill_loader import _read_skill_manifest_version
 
     skill = tmp_path / "skill"
     skill.mkdir()
