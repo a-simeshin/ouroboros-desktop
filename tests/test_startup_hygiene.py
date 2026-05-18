@@ -138,9 +138,9 @@ def test_check_uncommitted_changes_never_commits_outside_launcher(monkeypatch, t
 def test_lifespan_calls_apply_settings_to_env_before_supervisor(monkeypatch):
     """apply_settings_to_env must be called in server lifespan before _start_supervisor_if_needed.
 
-    Regression test for: ANTHROPIC_API_KEY from settings.json not visible to
-    resolve_claude_runtime at server startup because apply_settings_to_env was
-    only called inside the _run_supervisor background thread.
+    Regression test for: provider keys from settings.json (e.g. ANTHROPIC_API_KEY)
+    not visible to startup code paths because apply_settings_to_env was only
+    called inside the _run_supervisor background thread.
     """
     import ast
     import pathlib

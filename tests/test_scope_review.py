@@ -14,9 +14,7 @@ Verifies:
 
 import importlib
 import inspect
-import json
 import os
-import pathlib
 import subprocess
 import sys
 
@@ -164,7 +162,7 @@ class TestScopeFailClosed:
 
     def test_build_scope_prompt_deletion_not_blocked(self, tmp_path):
         """_build_scope_prompt must NOT block on deletion-only diffs.
-        
+
         Deletion-only diffs are valid: the HEAD snapshot shows old content,
         and the current_files_section has a deletion placeholder.
         This test verifies the correct new behavior after the Phase 3 fix.
@@ -341,7 +339,7 @@ class TestRunScopeReviewFailClosed:
 
     def test_build_scope_prompt_deletion_not_blocked_e2e(self, tmp_path):
         """_build_scope_prompt must NOT signal empty for deletion-only diffs.
-        
+
         After the Phase 3 fix, deletion-only commits reach the scope reviewer.
         The prompt-builder must return omitted=None (not '__empty__') so
         run_scope_review proceeds to the LLM instead of short-circuiting.
@@ -409,8 +407,9 @@ class TestScopeReviewModule:
 
     def test_scope_review_effort_configurable(self):
         """OUROBOROS_EFFORT_SCOPE_REVIEW should resolve via resolve_effort."""
-        from ouroboros.config import resolve_effort
         import os
+
+        from ouroboros.config import resolve_effort
         old = os.environ.get("OUROBOROS_EFFORT_SCOPE_REVIEW")
         try:
             os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] = "low"
@@ -434,62 +433,6 @@ class TestScopeReviewModule:
         mod = _get_module("ouroboros.tools.scope_review")
         source = inspect.getsource(mod._gather_scope_packs)
         assert "build_full_repo_pack" in source
-
-
-# ---------------------------------------------------------------------------
-# review_state path-aware freshness
-# ---------------------------------------------------------------------------
-
-class TestPathAwareFreshness:
-    def test_snapshot_hash_stable_without_message(self, tmp_path):
-        """Snapshot hash should NOT change when only commit_message changes."""
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        rs = _get_module("ouroboros.review_state")
-        h1 = rs.compute_snapshot_hash(tmp_path, "message A")
-        h2 = rs.compute_snapshot_hash(tmp_path, "message B")
-        # Hash now based on code only — should be SAME for different messages
-        assert h1 == h2
-
-    def test_snapshot_hash_changes_with_file_content(self, tmp_path):
-        """Snapshot hash must change when file content changes."""
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        (tmp_path / "file.py").write_text("v1", encoding="utf-8")
-        subprocess.run(["git", "add", "file.py"], cwd=str(tmp_path), capture_output=True)
-        rs = _get_module("ouroboros.review_state")
-        h1 = rs.compute_snapshot_hash(tmp_path, "msg")
-        # Modify file
-        (tmp_path / "file.py").write_text("v2", encoding="utf-8")
-        h2 = rs.compute_snapshot_hash(tmp_path, "msg")
-        assert h1 != h2
-
-    def test_path_scoped_hash(self, tmp_path):
-        """When paths= is provided, only those files affect the hash."""
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        (tmp_path / "a.py").write_text("aaa", encoding="utf-8")
-        (tmp_path / "b.py").write_text("bbb", encoding="utf-8")
-        rs = _get_module("ouroboros.review_state")
-        h_a = rs.compute_snapshot_hash(tmp_path, paths=["a.py"])
-        h_b = rs.compute_snapshot_hash(tmp_path, paths=["b.py"])
-        assert h_a != h_b
-
-    def test_stale_lifecycle(self):
-        """add_run marks previous non-matching fresh runs as stale."""
-        rs = _get_module("ouroboros.review_state")
-        state = rs.AdvisoryReviewState()
-        run1 = rs.AdvisoryRunRecord(
-            snapshot_hash="hash1", commit_message="m1",
-            status="fresh", ts="2026-01-01T00:00:00",
-        )
-        state.add_run(run1)
-        assert state.runs[0].status == "fresh"
-
-        run2 = rs.AdvisoryRunRecord(
-            snapshot_hash="hash2", commit_message="m2",
-            status="fresh", ts="2026-01-01T01:00:00",
-        )
-        state.add_run(run2)
-        assert state.runs[0].status == "stale"  # hash1 became stale
-        assert state.runs[1].status == "fresh"   # hash2 is fresh
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +495,6 @@ class TestGitWiring:
         source = inspect.getsource(git._repo_write_commit)
         assert "_run_reviewed_stage_cycle" in source
         shared_source = inspect.getsource(git._run_reviewed_stage_cycle)
-        assert "_check_advisory_freshness" in shared_source
         assert "_run_parallel_review" in shared_source
         parallel_source = inspect.getsource(git._run_parallel_review)
         assert "run_scope_review" in parallel_source
@@ -764,12 +706,6 @@ class TestGitWiring:
         # Stale findings must be cleared — no bleed-through to aggregate
         assert ctx._last_review_critical_findings == []
         assert "crashed" in review_err
-
-    def test_advisory_freshness_path_aware(self):
-        """_check_advisory_freshness must accept paths parameter."""
-        git = _get_module("ouroboros.tools.git")
-        sig = inspect.signature(git._check_advisory_freshness)
-        assert "paths" in sig.parameters
 
 
 # ---------------------------------------------------------------------------
@@ -1110,33 +1046,6 @@ class TestSharedLLMRouting:
         source = inspect.getsource(mod._emit_usage)
         assert "llm_usage" in source
         assert "event_queue" in source or "eq" in source
-
-
-# ---------------------------------------------------------------------------
-# Advisory schema enrichment
-# ---------------------------------------------------------------------------
-
-class TestAdvisorySchemaEnriched:
-    def test_advisory_schema_has_goal_scope_paths(self):
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        tools = adv.get_tools()
-        adv_tool = next(t for t in tools if t.name == "advisory_pre_review")
-        props = adv_tool.schema["parameters"]["properties"]
-        assert "goal" in props
-        assert "scope" in props
-        assert "paths" in props
-
-    def test_advisory_prompt_uses_section_loader(self):
-        """Advisory prompt builder must use precise section loader, not full CHECKLISTS.md."""
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        source = inspect.getsource(adv._build_advisory_prompt)
-        assert "load_checklist_section" in source
-
-    def test_advisory_no_blind_truncation(self):
-        """Advisory must not silently truncate raw_result."""
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        source = inspect.getsource(adv._handle_advisory_pre_review)
-        assert "raw_result[:4000]" not in source
 
 
 class TestScopePromptMatrixContract:

@@ -30,7 +30,7 @@ Attribution design (CRITICAL):
     If the amend step fails, the just-added commit is rolled back via
     `git reset --hard HEAD~1` and the function returns an error with
     context; earlier successfully-amended commits in the same batch are
-    kept (advisory invalidation still fires for them).
+    kept.
 
   Co-authored-by is provided as a *hint* for the final merge commit only.
   It is NOT the primary attribution mechanism.
@@ -44,7 +44,7 @@ Ouroboros identity:
 Adaptation work (P3 review-gate compliant):
   stage_adaptations() stages Ouroboros adaptation changes WITHOUT committing.
   Staged adaptation changes are included in the MERGE COMMIT created by
-  stage_pr_merge → repo_commit.  Do NOT call advisory_pre_review + repo_commit
+  stage_pr_merge → repo_commit.  Do NOT call repo_commit
   on the integration branch between stage_adaptations and stage_pr_merge:
   repo_commit always checks out ctx.branch_dev (ouroboros) first, which
   drops back off the integration branch and loses the staged state.
@@ -56,16 +56,16 @@ Adaptation work (P3 review-gate compliant):
     4. [optionally make adaptation edits]
     5. stage_adaptations()                     ← stage edits (NO commit yet)
     6. stage_pr_merge(branch='integrate/pr-N') ← merges + staged adaptations
-    7. advisory_pre_review + repo_commit       ← single merge commit on ouroboros
+    7. repo_commit                             ← single merge commit on ouroboros
 
-  Adaptation changes land in the merge commit (step 7) with Ouroboros as author.
+  Adaptation changes land in the merge commit (step 7, via repo_commit) with Ouroboros as author.
   There is no reviewed commit path on the integration branch itself.
   There is no unreviewed git commit path in this module.
 
 Merge flow:
   stage_pr_merge uses `git merge --no-ff --no-commit` which stages the
   integration-branch diff and sets MERGE_HEAD so the resulting merge commit
-  carries both parents.  Finalize via advisory_pre_review + repo_commit.
+  carries both parents.  Finalize via repo_commit.
   Staged adaptation changes (from stage_adaptations) are preserved because
   stage_pr_merge operates on the target branch (ouroboros) which has a clean
   tree — it does NOT checkout the integration branch.
@@ -91,7 +91,6 @@ import subprocess
 from typing import List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.git import _acquire_git_lock, _release_git_lock, _sanitize_git_error
 
 log = logging.getLogger(__name__)
@@ -343,7 +342,7 @@ def _create_integration_branch(
         f"                                              original author attribution\n"
         f"  2. stage_adaptations()                   ← optional: stage Ouroboros\n"
         f"                                              adaptation changes (no commit)\n"
-        f"  3. stage_pr_merge(branch='{branch_name}') → advisory_pre_review → repo_commit\n"
+        f"  3. stage_pr_merge(branch='{branch_name}') → repo_commit\n"
         f"     (staged adaptations from step 2 land in the final merge commit)"
     )
 
@@ -359,18 +358,12 @@ def _rollback_failed_amend(
 
     HEAD~1 is safe here because the caller just created HEAD via cherry-pick
     in the same loop iteration. Removes the sha from the applied list (since
-    it's been rolled back), invalidates advisory for any earlier successful
-    commits in the batch, and returns a diagnostic error string for the caller
-    to return directly.
+    it's been rolled back), and returns a diagnostic error string for the
+    caller to return directly.
     """
     amend_err = (amend_r.stderr or amend_r.stdout or "").strip()
     _g(["reset", "--hard", "HEAD~1"], repo_dir)
     applied.pop()
-    if applied:
-        _invalidate_advisory(
-            ctx, changed_paths=[], mutation_root=repo_dir,
-            source_tool="cherry_pick_pr_commits",
-        )
     return (
         f"⚠️ CHERRY_PICK_ERROR: author amend failed on {sha[:12]} "
         f"(rolled back to pre-commit state):\n{amend_err[:500]}\n\n"
@@ -449,7 +442,7 @@ def _amend_author_on_head(
     Returns the CompletedProcess so the caller can inspect returncode/stderr
     and decide on rollback. Does NOT handle failure itself — that's the
     caller's responsibility (it needs access to the applied list for
-    advisory invalidation).
+    rollback).
     """
     author_str = f'{override_author["name"]} <{override_author["email"]}>'
     return _g(
@@ -493,7 +486,7 @@ def _cherry_pick_pr_commits(
       If the amend step fails, the just-added commit is rolled back with
       `git reset --hard HEAD~1` and the function returns an error with
       context; earlier successfully-amended commits in the same batch are
-      kept (advisory invalidation still fires).
+      kept.
 
       The override applies to the ENTIRE batch uniformly — intended for
       single-author placeholder commit sets (e.g. external contributor
@@ -568,14 +561,7 @@ def _cherry_pick_pr_commits(
                 if date_r.returncode != 0 or not date_r.stdout.strip():
                     # Defense-in-depth: the ^{commit} prevalidation makes this
                     # branch extremely unlikely, but if it ever fires mid-batch
-                    # we must invalidate advisory for any earlier SHAs already
-                    # applied. Otherwise repo history changes silently while
-                    # advisory freshness can remain valid.
-                    if applied:
-                        _invalidate_advisory(
-                            ctx, changed_paths=[], mutation_root=repo_dir,
-                            source_tool="cherry_pick_pr_commits",
-                        )
+                    # earlier SHAs may already be applied.
                     return (
                         f"⚠️ CHERRY_PICK_ERROR: Cannot read author date for {sha[:12]} "
                         f"(git log returned {date_r.returncode}). Aborting before "
@@ -592,13 +578,6 @@ def _cherry_pick_pr_commits(
                 err = (result.stderr or result.stdout or "").strip()
                 _g(["cherry-pick", "--abort"], repo_dir)
                 if stop_on_conflict:
-                    # Invalidate advisory before returning — some commits may have
-                    # been successfully applied, changing repo history.
-                    if applied:
-                        _invalidate_advisory(
-                            ctx, changed_paths=[], mutation_root=repo_dir,
-                            source_tool="cherry_pick_pr_commits",
-                        )
                     return (
                         f"⚠️ CHERRY_PICK_CONFLICT on {sha[:12]}:\n{err[:500]}\n\n"
                         f"Applied before conflict: {[s[:12] for s in applied] or 'none'}\n"
@@ -643,9 +622,6 @@ def _cherry_pick_pr_commits(
             f"⚠️ CHERRY_PICK_ERROR: No commits were successfully applied.\n"
             f"Skipped (conflict): {skipped}"
         )
-
-    _invalidate_advisory(ctx, changed_paths=[], mutation_root=repo_dir,
-                         source_tool="cherry_pick_pr_commits")
 
     override_note = ""
     if override_author is not None:
@@ -695,7 +671,7 @@ def _cherry_pick_pr_commits(
         + f"\n\nNext:\n"
           f"  stage_adaptations()                      ← optional: stage Ouroboros\n"
           f"                                              adaptation changes (no commit)\n"
-          f"  stage_pr_merge(branch='{current_branch}') → advisory_pre_review → repo_commit\n"
+          f"  stage_pr_merge(branch='{current_branch}') → repo_commit\n"
           f"  (staged adaptations land in the merge commit — no intermediate commit needed)"
         + override_note
         + author_hint
@@ -712,13 +688,13 @@ def _stage_adaptations(ctx: ToolContext) -> str:
 
     IMPORTANT — correct usage sequence:
       Call stage_pr_merge DIRECTLY after stage_adaptations — do NOT run
-      advisory_pre_review + repo_commit between them.  repo_commit always
-      checks out ctx.branch_dev (ouroboros) first, which drops off the
+      repo_commit between them.  repo_commit always checks out
+      ctx.branch_dev (ouroboros) first, which drops off the
       integration branch and discards the staged state.
 
         stage_adaptations()                     ← stage adaptation edits
         stage_pr_merge(branch='integrate/pr-N') ← merge + include staged edits
-        advisory_pre_review + repo_commit       ← single merge commit on ouroboros
+        repo_commit                             ← single merge commit on ouroboros
 
       The staged adaptation changes survive the stage_pr_merge checkout because
       stage_pr_merge operates on ouroboros (clean tree); the staged index
@@ -747,9 +723,6 @@ def _stage_adaptations(ctx: ToolContext) -> str:
     finally:
         _release_git_lock(lock)
 
-    _invalidate_advisory(ctx, changed_paths=[], mutation_root=repo_dir,
-                         source_tool="stage_adaptations")
-
     files = staged.splitlines()
     return (
         f"✅ Staged {len(files)} file(s) on '{current_branch}' (NOT committed):\n"
@@ -769,7 +742,7 @@ def _stage_pr_merge(
     Uses `git merge --no-ff --no-commit`, which:
     - Sets MERGE_HEAD so the resulting commit has both parents (merge commit)
     - Stages all diff between integration branch and ouroboros
-    - Does NOT create a commit — finalize via advisory_pre_review + repo_commit
+    - Does NOT create a commit — finalize via repo_commit
 
     Target branch is always `ouroboros` (ctx.branch_dev).  This is required
     because repo_commit always begins with `git checkout ctx.branch_dev`; any
@@ -924,7 +897,7 @@ def _stage_pr_merge(
             )
 
         # Re-apply saved adaptations on top of the merged state so they land
-        # in the final merge commit created by advisory_pre_review + repo_commit.
+        # in the final merge commit created by repo_commit.
         # `--index` updates both index and worktree for consistency.
         if adaptation_patch:
             apply_r = subprocess.run(
@@ -956,9 +929,6 @@ def _stage_pr_merge(
         if log_r.returncode == 0:
             authors = sorted(set(log_r.stdout.strip().splitlines()))
 
-    _invalidate_advisory(ctx, changed_paths=[], mutation_root=repo_dir,
-                         source_tool="stage_pr_merge")
-
     co_authored = "\n".join(f"Co-authored-by: {a}" for a in authors) if authors else ""
     author_hint = (
         f"\n\nAttribution — include in repo_commit message:\n{co_authored}"
@@ -971,7 +941,6 @@ def _stage_pr_merge(
         f"  with both parents, preserving integration branch history.\n"
         f"  Branch '{branch}' left intact.\n\n"
         f"Next:\n"
-        f"  advisory_pre_review(commit_message='...')\n"
         f"  repo_commit(commit_message='...')"
         + author_hint
     )
@@ -1057,7 +1026,7 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "Stage all current working-tree changes on the integration branch WITHOUT "
                 "committing (git add -A only). Use after cherry_pick_pr_commits to prepare "
-                "Ouroboros adaptation/fixup changes. Finalize via advisory_pre_review + "
+                "Ouroboros adaptation/fixup changes. Finalize via "
                 "repo_commit to comply with BIBLE.md P3 (all commits must pass review). "
                 "Must be on an integrate/pr-N branch."
             ),
@@ -1073,7 +1042,7 @@ def get_tools() -> List[ToolEntry]:
                 "always ouroboros (repo_commit always checks out branch_dev before "
                 "committing — any other target would lose MERGE_HEAD). The "
                 "integration-branch history (with original author commits) is permanently "
-                "linked. Finalize via advisory_pre_review + repo_commit."
+                "linked. Finalize via repo_commit."
             ),
             "parameters": {"type": "object", "properties": {
                 "branch": {"type": "string",

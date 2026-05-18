@@ -33,7 +33,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # Code search
     "code_search",
     # Shell / CLI
-    "run_shell", "claude_code_edit",
+    "run_shell",
     # Git
     "git_status", "git_diff",
     "restore_to_head", "revert_commit",

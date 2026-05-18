@@ -4,7 +4,6 @@ Covers small, focused invariants from:
   - D1: scope_review must not overwrite signal_result.status
   - D2: scope_review_complete events carry prompt_tokens / headroom_tokens
   - D3: commit_gate stores full block_details (no [:4000] truncation)
-  - D4: _run_to_dict surfaces distinct status_summary per run type
   - D6: build_review_context shows multiple findings / continuations
   - B1.3: CHECKLISTS.md contains the Critical surface whitelist section
 """
@@ -12,8 +11,7 @@ Covers small, focused invariants from:
 from __future__ import annotations
 
 import pathlib
-from unittest.mock import MagicMock, patch
-
+from unittest.mock import MagicMock
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -51,8 +49,8 @@ class TestScopeSignalStatusPreserved:
         """run_scope_review must NOT overwrite signal_result.status from context_status."""
         from ouroboros.tools.scope_review import (
             ScopeReviewResult,
-            _TouchedContextStatus,
             _handle_prompt_signals,
+            _TouchedContextStatus,
         )
 
         # _handle_prompt_signals sets status="budget_exceeded" for this path
@@ -68,7 +66,7 @@ class TestScopeSignalStatusPreserved:
 class TestScopeHeadroomMetric:
     def test_log_scope_result_includes_headroom_fields(self, tmp_path):
         """scope_review_complete event MUST carry prompt_tokens, budget, and headroom."""
-        from ouroboros.tools.scope_review import _log_scope_result, _SCOPE_BUDGET_TOKEN_LIMIT
+        from ouroboros.tools.scope_review import _SCOPE_BUDGET_TOKEN_LIMIT, _log_scope_result
 
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
@@ -98,6 +96,7 @@ class TestBlockDetailsFullRoundTrip:
         truncation happens in review_status / format_status_section.
         """
         import inspect
+
         from ouroboros.tools import commit_gate
 
         source = inspect.getsource(commit_gate._record_commit_attempt)
@@ -130,82 +129,6 @@ class TestBlockDetailsFullRoundTrip:
         assert len(ca.block_details) > 16_000
 
 
-# ── D4 — _run_to_dict status_summary ────────────────────────────────────────
-
-class TestRunToDictStatusAware:
-    def test_responded_with_no_fails_is_responded_clean(self):
-        from ouroboros.review_evidence import _run_to_dict
-
-        run = MagicMock()
-        run.items = [{"item": "bible_compliance", "verdict": "PASS", "severity": "critical"}]
-        run.status = "fresh"
-        run.ts = "2026-04-16"
-        run.bypass_reason = ""
-        run.raw_result = ""
-
-        d = _run_to_dict(run)
-        assert d["status_summary"] == "responded_clean"
-        assert d["findings"] == []  # no FAIL items
-        assert d["total_items"] == 1
-        assert d["raw_result_present"] is False
-
-    def test_responded_with_fail_is_responded_with_findings(self):
-        from ouroboros.review_evidence import _run_to_dict
-
-        run = MagicMock()
-        run.items = [{"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "x"}]
-        run.status = "fresh"
-        run.ts = "2026-04-16"
-        run.bypass_reason = ""
-        run.raw_result = "full raw response here"
-
-        d = _run_to_dict(run)
-        assert d["status_summary"] == "responded_with_findings"
-        assert len(d["findings"]) == 1
-        assert d["raw_result_present"] is True
-
-    def test_bypassed_status_distinct_from_skipped(self):
-        from ouroboros.review_evidence import _run_to_dict
-
-        bypassed = MagicMock()
-        bypassed.items = []
-        bypassed.status = "bypassed"
-        bypassed.ts = "2026-04-16"
-        bypassed.bypass_reason = "user override"
-        bypassed.raw_result = ""
-
-        skipped = MagicMock()
-        skipped.items = []
-        skipped.status = "skipped"
-        skipped.ts = "2026-04-16"
-        skipped.bypass_reason = ""
-        skipped.raw_result = ""
-
-        assert _run_to_dict(bypassed)["status_summary"] == "bypassed"
-        assert _run_to_dict(skipped)["status_summary"] == "skipped"
-
-    def test_parse_failure_distinct_from_error(self):
-        from ouroboros.review_evidence import _run_to_dict
-
-        parse_fail = MagicMock()
-        parse_fail.items = []
-        parse_fail.status = "parse_failure"
-        parse_fail.ts = "2026-04-16"
-        parse_fail.bypass_reason = ""
-        parse_fail.raw_result = "garbled model output"
-
-        err = MagicMock()
-        err.items = []
-        err.status = "error"
-        err.ts = "2026-04-16"
-        err.bypass_reason = ""
-        err.raw_result = ""
-
-        assert _run_to_dict(parse_fail)["status_summary"] == "parse_failure"
-        assert _run_to_dict(parse_fail)["raw_result_present"] is True
-        assert _run_to_dict(err)["status_summary"] == "error"
-
-
 # ── D6 — build_review_context no longer caps at 1 finding ───────────────────
 
 class TestBuildReviewContextRelaxed:
@@ -218,6 +141,7 @@ class TestBuildReviewContextRelaxed:
         behavioural contract is unchanged — up to 3 findings per category, up to 5
         continuations visible."""
         import inspect
+
         from ouroboros import agent_task_pipeline
 
         source = inspect.getsource(agent_task_pipeline.build_review_context)
@@ -237,6 +161,7 @@ class TestBuildReviewContextRelaxed:
 class TestCircuitBreakerHintThreshold:
     def test_hint_fires_at_attempt_three_not_five(self):
         import inspect
+
         from ouroboros.tools import review
 
         # Find the source of the hint-building block in review.py

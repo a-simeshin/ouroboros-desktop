@@ -1,14 +1,13 @@
-"""Durable review/advisory state with typed attempt ledger and compatibility views.
+"""Durable review state with typed attempt ledger and compatibility views.
 
 State persists across task boundaries and restarts in
-``~/Ouroboros/data/state/advisory_review.json``.
+``~/Ouroboros/data/state/advisory_review.json`` (historical filename; the
+file now stores only the blocking-review ledger).
 
 The modern state model is a ledger:
-- ``advisory_runs[]`` — advisory pre-review coverage for snapshots
 - ``attempts[]`` — reviewed mutative attempts with lifecycle/status metadata
 
 Compatibility views remain available for the current desktop workflow:
-- ``runs`` (alias of ``advisory_runs``)
 - ``last_commit_attempt``
 - ``blocking_history``
 - ``open_obligations``
@@ -37,12 +36,10 @@ log = logging.getLogger(__name__)
 _STATE_RELPATH = "state/advisory_review.json"
 _LOCK_RELPATH = "locks/advisory_review.lock"
 _STATE_SCHEMA_VERSION = 3
-_MAX_RUN_HISTORY = 10
 _MAX_ATTEMPT_HISTORY = 50
 _MAX_BLOCKING_HISTORY = 10
 _MAX_COMMIT_READINESS_DEBTS = 50
 _DEFAULT_TOOL_NAME = "repo_commit"
-_DEFAULT_ADVISORY_TOOL_NAME = "advisory_pre_review"
 _LEGACY_CURRENT_REPO_KEY = "__legacy_current_repo__"
 _REVIEW_ATTEMPT_TTL_SEC = 1800
 _REVIEW_ATTEMPT_GRACE_SEC = 120
@@ -161,31 +158,6 @@ class CommitReadinessDebtItem:
 
 
 @dataclass
-class AdvisoryRunRecord:
-    """A single completed advisory pre-review run."""
-
-    snapshot_hash: str
-    commit_message: str
-    status: str
-    ts: str
-    items: List[Dict[str, Any]] = field(default_factory=list)
-    snapshot_summary: str = ""
-    raw_result: str = ""
-    bypass_reason: str = ""
-    bypassed_by_task: str = ""
-    snapshot_paths: Optional[List[str]] = field(default=None)
-    repo_key: str = _LEGACY_CURRENT_REPO_KEY
-    tool_name: str = _DEFAULT_ADVISORY_TOOL_NAME
-    task_id: str = ""
-    attempt: int = 0
-    phase: str = "advisory"
-    created_ts: str = ""
-    updated_ts: str = ""
-    readiness_warnings: List[str] = field(default_factory=list)
-    prompt_chars: int = 0
-    model_used: str = ""
-    duration_sec: float = 0.0
-@dataclass
 class CommitAttemptRecord:
     """Tracks one reviewed mutative tool attempt across its lifecycle."""
 
@@ -225,7 +197,6 @@ class AdvisoryReviewState:
     """Top-level durable state container."""
 
     state_version: int = _STATE_SCHEMA_VERSION
-    advisory_runs: List[AdvisoryRunRecord] = field(default_factory=list)
     attempts: List[CommitAttemptRecord] = field(default_factory=list)
     last_commit_attempt: Optional[CommitAttemptRecord] = field(default=None)
     blocking_history: List[CommitAttemptRecord] = field(default_factory=list)
@@ -233,21 +204,6 @@ class AdvisoryReviewState:
     next_obligation_seq: int = 1
     commit_readiness_debts: List[CommitReadinessDebtItem] = field(default_factory=list)
     next_commit_readiness_debt_seq: int = 1
-    last_stale_from_edit_ts: str = ""
-    last_stale_reason: str = ""
-    last_stale_repo_key: str = ""
-
-    @property
-    def runs(self) -> List[AdvisoryRunRecord]:
-        """Backward-compatible alias used by existing callers/tests."""
-        return self.advisory_runs
-
-    @runs.setter
-    def runs(self, value: List[AdvisoryRunRecord]) -> None:
-        self.advisory_runs = list(value or [])
-
-    def latest(self) -> Optional[AdvisoryRunRecord]:
-        return self.advisory_runs[-1] if self.advisory_runs else None
 
     def latest_attempt(self) -> Optional[CommitAttemptRecord]:
         return self.attempts[-1] if self.attempts else self.last_commit_attempt
@@ -285,33 +241,6 @@ class AdvisoryReviewState:
             ]
         return active
 
-    def filter_advisory_runs(
-        self,
-        *,
-        repo_key: str | None = None,
-        tool_name: str | None = None,
-        task_id: str | None = None,
-        attempt: int | None = None,
-    ) -> List[AdvisoryRunRecord]:
-        results = list(self.advisory_runs)
-        if repo_key is not None:
-            exact_match_exists = _repo_scope_exact_match_exists(results, repo_key)
-            results = [
-                run for run in results
-                if _repo_scope_matches(
-                    run.repo_key,
-                    repo_key,
-                    exact_match_exists=exact_match_exists,
-                )
-            ]
-        if tool_name is not None:
-            results = [run for run in results if run.tool_name == tool_name]
-        if task_id is not None:
-            results = [run for run in results if run.task_id == task_id]
-        if attempt is not None:
-            results = [run for run in results if int(run.attempt or 0) == int(attempt)]
-        return results
-
     def filter_attempts(
         self,
         *,
@@ -343,92 +272,6 @@ class AdvisoryReviewState:
         candidates = self.filter_attempts(repo_key=repo_key, tool_name=tool_name, task_id=task_id)
         latest = max((int(item.attempt or 0) for item in candidates), default=0)
         return latest + 1
-
-    def find_by_hash(
-        self,
-        snapshot_hash: str,
-        repo_key: str | None = None,
-    ) -> Optional[AdvisoryRunRecord]:
-        exact_match_exists = _repo_scope_exact_match_exists(self.advisory_runs, repo_key)
-        for run in reversed(self.advisory_runs):
-            if run.snapshot_hash != snapshot_hash:
-                continue
-            if _repo_scope_matches(
-                run.repo_key,
-                repo_key,
-                exact_match_exists=exact_match_exists,
-            ):
-                return run
-        return None
-
-    def is_fresh(self, snapshot_hash: str, repo_key: str | None = None) -> bool:
-        run = self.find_by_hash(snapshot_hash, repo_key=repo_key)
-        return run is not None and run.status in ("fresh", "bypassed", "skipped")
-
-    def add_run(self, run: AdvisoryRunRecord) -> None:
-        if not run.created_ts:
-            run.created_ts = run.ts or _utc_now()
-        if not run.updated_ts:
-            run.updated_ts = run.created_ts
-        self.mark_all_stale_except(run.snapshot_hash, repo_key=run.repo_key)
-        self.advisory_runs.append(run)
-        if len(self.advisory_runs) > _MAX_RUN_HISTORY:
-            self.advisory_runs = self.advisory_runs[-_MAX_RUN_HISTORY:]
-        if run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
-            self.last_stale_from_edit_ts = ""
-            self.last_stale_reason = ""
-            self.last_stale_repo_key = ""
-        self._sync_commit_readiness_debts(repo_key=run.repo_key or None)
-
-    def mark_stale(self, snapshot_hash: str) -> None:
-        for run in self.advisory_runs:
-            if run.snapshot_hash == snapshot_hash:
-                run.status = "stale"
-                run.updated_ts = _utc_now()
-
-    def mark_all_stale_except(self, snapshot_hash: str, repo_key: str = "") -> None:
-        for run in self.advisory_runs:
-            same_repo = not repo_key or run.repo_key == repo_key
-            if same_repo and run.snapshot_hash != snapshot_hash and run.status in ("fresh", "bypassed", "skipped"):
-                run.status = "stale"
-                run.updated_ts = _utc_now()
-
-    def mark_all_stale(self, reason_ts: str = "", reason: str = "", repo_key: str = "") -> None:
-        self.mark_repo_stale(repo_key="", reason_ts=reason_ts, reason=reason, stale_repo_key=repo_key)
-
-    def mark_repo_stale(
-        self,
-        *,
-        repo_key: str = "",
-        reason_ts: str = "",
-        reason: str = "",
-        stale_repo_key: str = "",
-    ) -> int:
-        """Invalidate advisory runs for a repo, with conservative fallback to full stale."""
-        invalidatable = [
-            run for run in self.advisory_runs
-            if run.status in ("fresh", "bypassed", "skipped")
-        ]
-        if not invalidatable:
-            return 0
-
-        target_runs: List[AdvisoryRunRecord]
-        if not repo_key:
-            target_runs = invalidatable
-        else:
-            exact_matches = [run for run in invalidatable if run.repo_key == repo_key]
-            legacy_present = any(run.repo_key in ("", _LEGACY_CURRENT_REPO_KEY) for run in invalidatable)
-            target_runs = invalidatable if legacy_present and not exact_matches else (exact_matches or invalidatable)
-
-        for run in target_runs:
-            run.status = "stale"
-            run.updated_ts = reason_ts or _utc_now()
-        if target_runs:
-            self.last_stale_from_edit_ts = reason_ts or _utc_now()
-            self.last_stale_reason = reason
-            self.last_stale_repo_key = stale_repo_key or repo_key
-            self._sync_commit_readiness_debts(repo_key=stale_repo_key or repo_key or None)
-        return len(target_runs)
 
     def add_blocking_attempt(self, attempt: CommitAttemptRecord) -> None:
         """Backward-compatible alias preserved for existing callers/tests."""
@@ -679,36 +522,11 @@ class AdvisoryReviewState:
                 "evidence": evidence,
             })
 
-        stale_matches_repo = repo_key is None or self.last_stale_repo_key in ("", repo_key)
-        if self.last_stale_from_edit_ts and stale_matches_repo:
-            _remember({
-                "category": "advisory_stale",
-                "title": "Advisory freshness debt",
-                "summary": "Fresh advisory coverage was invalidated by a worktree mutation before the next reviewed attempt.",
-                "severity": "warning",
-                "repo_key": str(self.last_stale_repo_key or repo_key or ""),
-                "fingerprint": "advisory_stale",
-                "source": "review_state",
-                "source_obligation_ids": [],
-                "evidence": [str(self.last_stale_reason or "worktree mutation invalidated advisory freshness")],
-            })
-
         scoped_attempts = (
             self.filter_attempts(repo_key=repo_key)
             if repo_key is not None else list(self.attempts)
         )
         latest_attempt = scoped_attempts[-1] if scoped_attempts else None
-        latest_success_ts = ""
-        for attempt in reversed(scoped_attempts):
-            if str(getattr(attempt, "status", "") or "") != "succeeded":
-                continue
-            latest_success_ts = str(
-                getattr(attempt, "finished_ts", "")
-                or getattr(attempt, "updated_ts", "")
-                or getattr(attempt, "ts", "")
-                or ""
-            )
-            break
 
         if (
             latest_attempt
@@ -728,35 +546,6 @@ class AdvisoryReviewState:
                     "fingerprint": f"readiness_warning:attempt:{_stable_digest(warning_text)}",
                     "source": "review_state",
                     "source_obligation_ids": list(getattr(latest_attempt, "obligation_ids", []) or []),
-                    "evidence": [warning_text],
-                })
-
-        advisory_runs = self.filter_advisory_runs(repo_key=repo_key) if repo_key is not None else list(self.advisory_runs)
-        latest_run = advisory_runs[-1] if advisory_runs else None
-        latest_run_ts = str(
-            getattr(latest_run, "updated_ts", "")
-            or getattr(latest_run, "ts", "")
-            or ""
-        ) if latest_run else ""
-        advisory_warnings_resolved = bool(
-            latest_success_ts
-            and latest_run_ts
-            and _max_iso_ts(latest_run_ts, latest_success_ts) == latest_success_ts
-        )
-        if latest_run and latest_run.readiness_warnings and not advisory_warnings_resolved:
-            for warning in latest_run.readiness_warnings:
-                warning_text = str(warning or "").strip()
-                if not warning_text:
-                    continue
-                _remember({
-                    "category": "readiness_warning",
-                    "title": "Readiness warning debt",
-                    "summary": warning_text,
-                    "severity": "warning",
-                    "repo_key": str(getattr(latest_run, "repo_key", "") or repo_key or ""),
-                    "fingerprint": f"readiness_warning:advisory:{_stable_digest(warning_text)}",
-                    "source": "advisory_pre_review",
-                    "source_obligation_ids": [],
                     "evidence": [warning_text],
                 })
 
@@ -1075,9 +864,6 @@ class AdvisoryReviewState:
         if repo_key is None:
             self.open_obligations = []
             self.blocking_history = []
-            self.last_stale_from_edit_ts = ""
-            self.last_stale_reason = ""
-            self.last_stale_repo_key = ""
             for debt in _commit_readiness_debts_view(self):
                 self._hydrate_commit_readiness_debt(debt)
                 if debt.status in _OPEN_COMMIT_READINESS_DEBT_STATUSES:
@@ -1105,10 +891,6 @@ class AdvisoryReviewState:
                 exact_match_exists=exact_history_match,
             )
         ]
-        if self.last_stale_repo_key in ("", repo_key):
-            self.last_stale_from_edit_ts = ""
-            self.last_stale_reason = ""
-            self.last_stale_repo_key = ""
         self._sync_commit_readiness_debts(repo_key=repo_key)
 
     def expire_stale_attempts(
@@ -1208,34 +990,6 @@ def _commit_readiness_debt_from_dict(d: Dict[str, Any]) -> CommitReadinessDebtIt
     )
 
 
-def _record_from_dict(d: Dict[str, Any]) -> AdvisoryRunRecord:
-    raw_paths = d.get("snapshot_paths")
-    ts = str(d.get("ts", ""))
-    return AdvisoryRunRecord(
-        snapshot_hash=str(d.get("snapshot_hash", "")),
-        commit_message=str(d.get("commit_message", "")),
-        status=str(d.get("status", "stale")),
-        ts=ts,
-        items=list(d.get("items") or []),
-        snapshot_summary=str(d.get("snapshot_summary", "")),
-        raw_result=str(d.get("raw_result", "")),
-        bypass_reason=str(d.get("bypass_reason", "")),
-        bypassed_by_task=str(d.get("bypassed_by_task", "")),
-        snapshot_paths=list(raw_paths) if isinstance(raw_paths, list) else None,
-        repo_key=str(d.get("repo_key", _LEGACY_CURRENT_REPO_KEY)),
-        tool_name=str(d.get("tool_name", _DEFAULT_ADVISORY_TOOL_NAME)),
-        task_id=str(d.get("task_id", d.get("bypassed_by_task", ""))),
-        attempt=_coerce_int(d.get("attempt", 0)),
-        phase=str(d.get("phase", "advisory")),
-        created_ts=str(d.get("created_ts", ts)),
-        updated_ts=str(d.get("updated_ts", ts)),
-        readiness_warnings=[str(x) for x in (d.get("readiness_warnings") or [])],
-        prompt_chars=int(d.get("prompt_chars", 0) or 0),
-        model_used=str(d.get("model_used", "")),
-        duration_sec=float(d.get("duration_sec", 0.0) or 0.0),
-    )
-
-
 def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
     ts = str(d.get("ts", ""))
     status = str(d.get("status", "failed"))
@@ -1282,11 +1036,6 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
     if not isinstance(data, dict):
         return AdvisoryReviewState()
 
-    raw_runs = data.get("advisory_runs")
-    if raw_runs is None:
-        raw_runs = data.get("runs") or []
-    advisory_runs = [_record_from_dict(r) for r in (raw_runs or []) if isinstance(r, dict)]
-
     attempts = [
         _commit_attempt_from_dict(item)
         for item in (data.get("attempts") or [])
@@ -1315,7 +1064,6 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
 
     state = AdvisoryReviewState(
         state_version=_coerce_int(data.get("state_version", data.get("schema_version", _STATE_SCHEMA_VERSION))),
-        advisory_runs=advisory_runs,
         attempts=attempts,
         last_commit_attempt=last_commit,
         blocking_history=blocking_history,
@@ -1329,9 +1077,6 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
             data.get("next_commit_readiness_debt_seq", _infer_next_prefixed_sequence(commit_readiness_debts, "crd-")),
             _infer_next_prefixed_sequence(commit_readiness_debts, "crd-"),
         ),
-        last_stale_from_edit_ts=str(data.get("last_stale_from_edit_ts", "")),
-        last_stale_reason=str(data.get("last_stale_reason", "")),
-        last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
     )
 
     if not state.attempts:
@@ -1393,8 +1138,6 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
     data: Dict[str, Any] = {
         "state_version": _STATE_SCHEMA_VERSION,
         "schema_version": _STATE_SCHEMA_VERSION,
-        "advisory_runs": [asdict(r) for r in state.advisory_runs],
-        "runs": [asdict(r) for r in state.advisory_runs],
         "attempts": [asdict(r) for r in state.attempts],
         "last_commit_attempt": asdict(state.last_commit_attempt) if state.last_commit_attempt else None,
         "blocking_history": [asdict(r) for r in state.blocking_history],
@@ -1402,9 +1145,6 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
         "next_obligation_seq": int(state.next_obligation_seq or 1),
         "commit_readiness_debts": [asdict(item) for item in state.commit_readiness_debts],
         "next_commit_readiness_debt_seq": int(state.next_commit_readiness_debt_seq or 1),
-        "last_stale_from_edit_ts": state.last_stale_from_edit_ts,
-        "last_stale_reason": state.last_stale_reason,
-        "last_stale_repo_key": state.last_stale_repo_key,
         "saved_at": _utc_now(),
     }
     tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
@@ -1490,13 +1230,7 @@ def release_review_state_lock(drive_root: pathlib.Path, lock_fd: Optional[int]) 
         log.debug("Failed to unlink review-state lock", exc_info=True)
 
 
-# --- Snapshot hash / repo identity ---
-
-_SNAPSHOT_EXCLUDE_PATHS = frozenset({
-    "state/advisory_review.json",
-    "state/queue_snapshot.json",
-})
-
+# --- Repo identity ---
 
 def discover_repo_root(path: pathlib.Path) -> pathlib.Path:
     """Return the nearest directory containing `.git`, else the resolved input path."""
@@ -1514,163 +1248,24 @@ def make_repo_key(repo_dir: pathlib.Path) -> str:
     return str(discover_repo_root(repo_dir))
 
 
-def compute_snapshot_hash(
-    repo_dir: pathlib.Path,
-    commit_message: str = "",
-    paths: list[str] | None = None,
-) -> str:
-    """Build a deterministic hash for the current worktree snapshot."""
-    if isinstance(paths, list) and len(paths) == 0:
-        paths = None
-
-    changed_digests: List[tuple[str, str]] = []
-
-    def _record_digest(relpath: str) -> None:
-        relpath = relpath.strip()
-        if not relpath or relpath in _SNAPSHOT_EXCLUDE_PATHS:
-            return
-        file_path = repo_dir / relpath
-        try:
-            if file_path.is_file():
-                digest = hashlib.sha256(file_path.read_bytes()).hexdigest()[:16]
-            else:
-                digest = "deleted"
-        except Exception:
-            digest = "unreadable"
-        changed_digests.append((relpath, digest))
-
-    if paths is not None:
-        for relpath in paths:
-            _record_digest(relpath)
-    else:
-        try:
-            from ouroboros.tools.review_helpers import list_changed_paths_from_git_status
-
-            for relpath in list_changed_paths_from_git_status(repo_dir):
-                _record_digest(relpath)
-        except Exception as e:
-            log.debug("compute_snapshot_hash: git status failed: %s", e)
-
-    h = hashlib.sha256()
-    for relpath, digest in sorted(changed_digests):
-        h.update(f"{relpath}:{digest}\n".encode())
-    return h.hexdigest()[:32]
-
-
-# --- Advisory staleness from worktree edits ---
-
-def mark_advisory_stale_after_edit(drive_root: pathlib.Path) -> None:
-    """Mark all fresh advisory runs as stale because the worktree was modified."""
-    try:
-        updated = update_state(drive_root, lambda state: _mark_advisory_stale_locked(state))
-        if isinstance(updated, AdvisoryReviewState):
-            log.debug("Advisory state marked stale after worktree edit")
-    except Exception as e:
-        log.debug("mark_advisory_stale_after_edit failed (non-fatal): %s", e)
-
-
-def _mark_advisory_stale_locked(state: AdvisoryReviewState) -> None:
-    has_invalidatable = any(r.status in ("fresh", "bypassed", "skipped") for r in state.advisory_runs)
-    if not has_invalidatable:
-        return
-    state.mark_all_stale(reason_ts=_utc_now(), reason="Worktree edit invalidated advisory freshness.")
-
-
-def invalidate_advisory_after_mutation(
-    drive_root: pathlib.Path,
-    *,
-    mutation_root: pathlib.Path | None = None,
-    changed_paths: Optional[List[str]] = None,
-    source_tool: str = "",
-) -> None:
-    """Invalidate advisory freshness after a successful mutating tool path.
-
-    Repo identity is inferred from the nearest `.git` root of the mutation root / changed
-    paths. If repo resolution is ambiguous, conservatively stale all fresh advisory runs.
-    """
-    try:
-        changed_paths = [str(p).strip() for p in (changed_paths or []) if str(p).strip()]
-        resolved_repo_keys = _resolve_mutation_repo_keys(mutation_root, changed_paths)
-        reason_ts = _utc_now()
-        reason = _build_invalidation_reason(source_tool, mutation_root, changed_paths, resolved_repo_keys)
-
-        def _mutate(state: AdvisoryReviewState) -> None:
-            if not resolved_repo_keys or len(resolved_repo_keys) != 1:
-                state.mark_all_stale(reason_ts=reason_ts, reason=reason)
-                return
-            state.mark_repo_stale(
-                repo_key=resolved_repo_keys[0],
-                reason_ts=reason_ts,
-                reason=reason,
-                stale_repo_key=resolved_repo_keys[0],
-            )
-
-        update_state(drive_root, _mutate)
-    except Exception as e:
-        log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
-
-
 # --- Context injection ---
 
 def format_status_section(state: AdvisoryReviewState,
                           repo_dir: Optional[pathlib.Path] = None) -> str:
     """Render a compact historical section for LLM context injection."""
     repo_key = make_repo_key(repo_dir) if repo_dir is not None else None
-    advisory_runs = state.filter_advisory_runs(repo_key=repo_key) if repo_key is not None else list(state.advisory_runs)
     attempts = state.filter_attempts(repo_key=repo_key) if repo_key is not None else list(state.attempts)
     last_attempt = state.latest_attempt_for(repo_key=repo_key) if repo_key is not None else state.last_commit_attempt
     open_obs = state.get_open_obligations(repo_key=repo_key)
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
 
-    if not advisory_runs and last_attempt is None and not open_obs and not open_debts:
-        return "## Advisory Pre-Review Status\n\nNo advisory runs recorded yet."
+    if last_attempt is None and not open_obs and not open_debts:
+        return "## Review Status\n\nNo reviewed attempts recorded yet."
 
     lines = [
-        "## Advisory Pre-Review Status",
-        "(Historical — run `review_status` for gate-accurate live freshness)",
+        "## Review Status",
+        "(Historical — run `review_status` for gate-accurate live state)",
     ]
-
-    # No [-3:] cap — include ALL advisory runs so history is preserved.
-    for run in advisory_runs:
-        status_icon = {
-            "fresh": "✅",
-            "stale": "⚠️",
-            "bypassed": "⏭️",
-            "skipped": "⏭️",
-            "parse_failure": "🔴",
-        }.get(run.status, "❓")
-        ts_display = run.ts  # full timestamp — no [:16] truncation
-        hash_short = run.snapshot_hash[:12]
-        commit_display = run.commit_message  # full message — no [:60] truncation
-
-        lines.append(f"\n{status_icon} **{run.status.upper()}** | hash={hash_short} | {ts_display}")
-        lines.append(f"   Commit: {commit_display}")
-        if run.bypass_reason:
-            lines.append(f"   Bypassed: {run.bypass_reason}")
-        if run.snapshot_summary:
-            lines.append(f"   Scope: {run.snapshot_summary}")
-
-        findings = [
-            item for item in (run.items or [])
-            if isinstance(item, dict) and str(item.get("verdict", "")).upper() == "FAIL"
-        ]
-        if findings:
-            lines.append(f"   Findings ({len(findings)}):")
-            # No [:N] cap — include ALL findings so advisory receives complete history.
-            for item in findings:
-                sev = str(item.get("severity", "advisory")).upper()
-                name = item.get("item", "?")
-                reason = _truncate_review_reason(item.get("reason", ""))
-                lines.append(f"     [{sev}] {name}: {reason}")
-        elif run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
-            lines.append("   No findings recorded.")
-
-    stale_matches_repo = repo_key is None or state.last_stale_repo_key in ("", repo_key)
-    if state.last_stale_from_edit_ts and stale_matches_repo:
-        lines.append(f"\n⚠️ Advisory marked stale after worktree edit at {state.last_stale_from_edit_ts}.")  # full ts — no [:16]
-        if state.last_stale_reason:
-            lines.append(f"   Reason: {state.last_stale_reason}")
-        lines.append("   Run advisory_pre_review again before repo_commit.")
 
     if open_debts:
         lines.append(f"\n### Commit-readiness debt ({len(open_debts)})")
@@ -1753,13 +1348,13 @@ def format_status_section(state: AdvisoryReviewState,
 
     if open_obs:
         lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
-        # No [:N] cap — all obligations shown; advisory must address each one.
+        # No [:N] cap — all obligations shown; the next reviewed attempt must address each one.
         for ob in open_obs:
             reason = _truncate_review_reason(ob.reason)
             source = ob.source_attempt_msg  # full message — no [:60] truncation
             lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {reason}")
             lines.append(f"      Source: {ob.source_attempt_ts} — \"{source}\"")  # full ts — no [:16]
-        lines.append("   Advisory MUST verify each obligation is resolved before PASS.")
+        lines.append("   Each obligation must be resolved before the next reviewed commit can PASS.")
 
     return "\n".join(lines)
 
@@ -1857,8 +1452,6 @@ def _infer_phase(status: str, block_reason: str = "") -> str:
     if status == "reviewing":
         return "review"
     if status == "blocked":
-        if block_reason == "no_advisory":
-            return "advisory_gate"
         if block_reason == "preflight":
             return "preflight"
         return "blocking_review"
@@ -1911,53 +1504,6 @@ def _sync_compat_views(state: AdvisoryReviewState) -> None:
         state._upsert_attempt(state.last_commit_attempt)
     elif state.attempts:
         state.last_commit_attempt = state.attempts[-1]
-
-
-def _resolve_mutation_repo_keys(
-    mutation_root: pathlib.Path | None,
-    changed_paths: List[str],
-) -> List[str]:
-    base = mutation_root.resolve() if mutation_root is not None else None
-    repo_keys: List[str] = []
-
-    def _record(candidate: pathlib.Path) -> None:
-        key = make_repo_key(candidate)
-        if key and key not in repo_keys:
-            repo_keys.append(key)
-
-    if base is not None:
-        _record(base)
-    for rel_path in changed_paths:
-        candidate = pathlib.Path(rel_path)
-        if not candidate.is_absolute() and base is not None:
-            candidate = (base / rel_path).resolve()
-        elif not candidate.is_absolute():
-            continue
-        _record(candidate if candidate.exists() else candidate.parent)
-    return repo_keys
-
-
-def _build_invalidation_reason(
-    source_tool: str,
-    mutation_root: pathlib.Path | None,
-    changed_paths: List[str],
-    repo_keys: List[str],
-) -> str:
-    tool = source_tool or "mutation"
-    repo_hint = ""
-    if len(repo_keys) == 1:
-        repo_hint = f" repo={repo_keys[0]}"
-    elif len(repo_keys) > 1:
-        repo_hint = " repo=multiple"
-    path_hint = ""
-    if changed_paths:
-        preview = ", ".join(changed_paths[:3])
-        if len(changed_paths) > 3:
-            preview += f", +{len(changed_paths) - 3} more"
-        path_hint = f" paths={preview}"
-    elif mutation_root is not None:
-        path_hint = f" root={mutation_root}"
-    return f"{tool} mutated the worktree; advisory freshness invalidated.{repo_hint}{path_hint}"
 
 
 def _utc_now() -> str:

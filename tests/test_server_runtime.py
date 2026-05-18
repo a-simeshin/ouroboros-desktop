@@ -104,13 +104,11 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
 
 def test_apply_runtime_provider_defaults_refreshes_retired_opus_defaults_with_openrouter():
     old_openrouter = "anthropic/claude-opus-" + "4.7"
-    old_claude_code = "claude-opus-" + "4-7[1m]"
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENROUTER_API_KEY": "sk-or",
         "OUROBOROS_MODEL": old_openrouter,
         "OUROBOROS_MODEL_CODE": old_openrouter,
         "OUROBOROS_REVIEW_MODELS": f"openai/gpt-5.5,{old_openrouter}",
-        "CLAUDE_CODE_MODEL": old_claude_code,
     })
 
     assert changed
@@ -118,7 +116,6 @@ def test_apply_runtime_provider_defaults_refreshes_retired_opus_defaults_with_op
     assert normalized["OUROBOROS_MODEL"] == "anthropic/claude-opus-4.6"
     assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic/claude-opus-4.6"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,anthropic/claude-opus-4.6"
-    assert normalized["CLAUDE_CODE_MODEL"] == "claude-opus-4-6[1m]"
 
 
 def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
@@ -241,7 +238,7 @@ def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():
 
 # --- Tests for Fix C (classify_runtime_provider_change) ---
 
-from ouroboros.server_runtime import classify_runtime_provider_change
+from ouroboros.server_runtime import classify_runtime_provider_change  # noqa: E402
 
 
 class TestClassifyRuntimeProviderChange:

@@ -331,9 +331,9 @@ def test_run_reflection_returns_entry_when_generated(tmp_path):
                 "content": (
                     "Reflection text.\n"
                     "BACKLOG_CANDIDATES_JSON: "
-                    "[{\"summary\":\"Reduce recurring task friction around REVIEW_BLOCKED\"," 
-                    "\"category\":\"process\"," 
-                    "\"source\":\"execution_reflection\"," 
+                    "[{\"summary\":\"Reduce recurring task friction around REVIEW_BLOCKED\","
+                    "\"category\":\"process\","
+                    "\"source\":\"execution_reflection\","
                     "\"evidence\":\"REVIEW_BLOCKED\"}]"
                 )
             }, {"cost": 0}
@@ -358,12 +358,12 @@ def test_run_reflection_returns_entry_when_generated(tmp_path):
 
 
 def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
+    """Blocking-triad obligations recorded against repo B must not leak into
+    the evidence collected for repo A (repo-scoped blocking ledger)."""
     from ouroboros.review_evidence import collect_review_evidence
     from ouroboros.review_state import (
         AdvisoryReviewState,
-        AdvisoryRunRecord,
         CommitAttemptRecord,
-        compute_snapshot_hash,
         make_repo_key,
         save_state,
     )
@@ -377,16 +377,8 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
     (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
 
-    repo_a_key = make_repo_key(repo_a)
     repo_b_key = make_repo_key(repo_b)
     state = AdvisoryReviewState()
-    state.add_run(AdvisoryRunRecord(
-        snapshot_hash=compute_snapshot_hash(repo_a),
-        commit_message="repo a ready",
-        status="fresh",
-        ts="2026-04-07T10:00:00+00:00",
-        repo_key=repo_a_key,
-    ))
     state.record_attempt(CommitAttemptRecord(
         ts="2026-04-07T10:01:00+00:00",
         commit_message="repo b blocked",
@@ -403,18 +395,16 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
             "verdict": "FAIL",
         }],
     ))
-    state.last_stale_from_edit_ts = "2026-04-07T10:02:00+00:00"
-    state.last_stale_reason = "repo-b mutation"
-    state.last_stale_repo_key = repo_b_key
     save_state(tmp_path, state)
 
     evidence = collect_review_evidence(tmp_path, repo_dir=repo_a)
 
-    assert evidence["current_repo"]["repo_commit_ready"] is True
-    assert evidence["current_repo"]["stale_reason"] == ""
-    assert evidence["current_repo"]["stale_ts"] == ""
+    # Blocking-triad obligations/debts from repo B must not surface for repo A.
     assert evidence["open_obligations"] == []
     assert evidence["commit_readiness_debts"] == []
+    assert all(
+        a.get("repo_key") != repo_b_key for a in evidence["recent_attempts"]
+    )
 
 
 def test_collect_review_evidence_includes_commit_readiness_debt(tmp_path):
@@ -450,7 +440,6 @@ def test_collect_review_evidence_includes_commit_readiness_debt(tmp_path):
 
     evidence = collect_review_evidence(tmp_path, repo_dir=repo_dir)
 
-    assert evidence["current_repo"]["repo_commit_ready"] is False
     assert len(evidence["commit_readiness_debts"]) >= 1
     assert evidence["commit_readiness_debts"][0]["category"] in {"obligation_repeat", "readiness_warning"}
 
@@ -473,3 +462,58 @@ def test_truncate_with_notice_uses_utils_ssot():
 
     # Handles None gracefully
     assert pipeline._truncate_with_notice(None, 10) == ""
+
+
+def test_blocking_advisory_findings_still_rendered(tmp_path):
+    """The blocking-triad severity tag CommitAttemptRecord.advisory_findings
+    (carried onto review continuations) must still be rendered by
+    build_review_context.
+
+    advisory_findings here is NOT the removed Claude-SDK advisory pre-review;
+    it is the "advisory" (vs "critical") severity tag of blocking review-triad
+    findings — part of the kept blocking machinery.
+    """
+    from ouroboros.review_state import make_repo_key
+    from ouroboros.task_continuation import (
+        ReviewContinuation,
+        save_review_continuation,
+    )
+
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir(parents=True)
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True)
+    (repo_dir / ".git").mkdir()
+
+    repo_key = make_repo_key(repo_dir)
+    continuation = ReviewContinuation(
+        task_id="task-adv-1",
+        source="repo_commit",
+        stage="reviewed",
+        repo_key=repo_key,
+        tool_name="repo_commit",
+        attempt=1,
+        commit_message="blocked with advisory triad findings",
+        block_reason="critical_findings",
+        block_details="⚠️ REVIEW_BLOCKED",
+        critical_findings=[{
+            "item": "tests_affected",
+            "reason": "missing tests",
+            "severity": "critical",
+            "verdict": "FAIL",
+        }],
+        advisory_findings=[{
+            "item": "doc_drift",
+            "reason": "minor README wording mismatch",
+            "severity": "advisory",
+            "verdict": "FAIL",
+        }],
+    )
+    save_review_continuation(drive_root, continuation)
+
+    env = SimpleNamespace(drive_root=str(drive_root), repo_dir=str(repo_dir))
+    context = pipeline.build_review_context(env)
+
+    # The blocking-triad advisory severity tag must still be rendered.
+    assert "advisory_finding=doc_drift" in context
+    assert "minor README wording mismatch" in context

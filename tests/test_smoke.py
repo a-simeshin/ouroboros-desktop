@@ -17,7 +17,7 @@ import re
 import sys
 import tempfile
 
-import pytest
+import pytest  # ty: ignore[unresolved-import]
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -43,7 +43,6 @@ TOOL_MODULES = [
     "ouroboros.tools.search",
     "ouroboros.tools.control",
     "ouroboros.tools.review",
-    "ouroboros.tools.claude_advisory_review",
     "ouroboros.tools.scope_review",
     "ouroboros.tools.review_helpers",
     "ouroboros.tools.plan_review",
@@ -98,7 +97,7 @@ EXPECTED_TOOLS = [
     "data_read", "data_write", "data_list",
     "git_status", "git_diff",
     "pull_from_remote", "restore_to_head", "revert_commit", "rollback_to_target",
-    "run_shell", "exec", "bash", "shell", "run_command", "claude_code_edit",
+    "run_shell", "exec", "bash", "shell", "run_command",
     "web_search",
     "chat_history", "update_scratchpad", "update_identity",
     "set_tool_timeout", "request_restart", "promote_to_stable", "request_deep_self_review",
@@ -130,8 +129,6 @@ EXPECTED_TOOLS = [
     "compact_context",
     "list_available_tools",
     "enable_tools",
-    # Advisory pre-review gate
-    "advisory_pre_review", "review_status",
     # Pre-implementation design review
     "plan_task",
     # CI
@@ -193,8 +190,6 @@ def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
     expected_subset = {
         "memory_map",
         "memory_update_registry",
-        "advisory_pre_review",
-        "review_status",
         "plan_task",
         "rollback_to_target",
         "run_ci_tests",
@@ -318,7 +313,7 @@ def test_context_build_memory_sections():
 
 def test_no_hardcoded_replies():
     """Principle 5 (LLM-First): no hardcoded reply strings in code.
-    
+
     Checks for suspicious patterns like:
     - reply = "Fixed string"
     - return "Sorry, I can't..."
@@ -341,7 +336,7 @@ def test_no_hardcoded_replies():
                     if "{" in line or "f'" in line or 'f"' in line:
                         continue
                     violations.append(f"{path.name}:{i}: {line.strip()}")
-    assert len(violations) < 5, f"Possible hardcoded replies:\n" + "\n".join(violations)
+    assert len(violations) < 5, "Possible hardcoded replies:\n" + "\n".join(violations)
 
 
 def test_version_file_exists():
@@ -397,7 +392,7 @@ def test_no_env_dumping():
                     continue
                 if dangerous.search(line):
                     violations.append(f"{path.name}:{i}: {line.strip()[:80]}")
-    assert len(violations) == 0, f"Dangerous env dumping:\n" + "\n".join(violations)
+    assert len(violations) == 0, "Dangerous env dumping:\n" + "\n".join(violations)
 
 
 def test_no_oversized_modules():
@@ -421,7 +416,7 @@ def test_no_oversized_modules():
 
 def test_no_bare_except_pass():
     """No bare `except: pass` (not even except Exception: pass with just pass).
-    
+
     v4.9.0 hardened exceptions — but checks the STRICTEST form:
     bare except (no Exception class) followed by pass.
     """
@@ -443,7 +438,7 @@ def test_no_bare_except_pass():
                         if next_line and next_line == "pass":
                             violations.append(f"{path.name}:{i}: bare except: pass")
                             break
-    assert len(violations) == 0, f"Bare except:pass found:\n" + "\n".join(violations)
+    assert len(violations) == 0, "Bare except:pass found:\n" + "\n".join(violations)
 
 
 # ── AST-based function size check ───────────────────────────────
@@ -473,7 +468,7 @@ def _get_function_sizes():
                 continue
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    size = node.end_lineno - node.lineno + 1
+                    size = node.end_lineno - node.lineno + 1  # ty: ignore[unsupported-operator]
                     results.append((f, node.name, size))
     return results
 
@@ -511,12 +506,13 @@ class TestPrePushGate:
     def test_run_pre_push_tests_disabled(self):
         """When OUROBOROS_PRE_PUSH_TESTS=0, should return None (skip)."""
         import os
+
         from ouroboros.tools.git import _run_pre_push_tests
         old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
         try:
             os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "0"
             # ctx doesn't matter since we return early
-            result = _run_pre_push_tests(None)
+            result = _run_pre_push_tests(None)  # ty: ignore[invalid-argument-type]
             assert result is None
         finally:
             if old is None:
@@ -526,15 +522,16 @@ class TestPrePushGate:
 
     def test_run_pre_push_tests_no_tests_dir(self):
         """When tests/ dir doesn't exist, should return None."""
-        from ouroboros.tools.git import _run_pre_push_tests
         import os
+
+        from ouroboros.tools.git import _run_pre_push_tests
         old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
         try:
             os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "1"
             # Create a mock ctx with non-existent repo_dir
             class FakeCtx:
                 repo_dir = "/tmp/nonexistent_repo_dir_12345"
-            result = _run_pre_push_tests(FakeCtx())
+            result = _run_pre_push_tests(FakeCtx())  # ty: ignore[invalid-argument-type]
             assert result is None
         finally:
             if old is None:
@@ -570,7 +567,7 @@ class TestPrePushGate:
                     if kw.arg == "timeout" and isinstance(kw.value, ast.Constant):
                         found_timeout = kw.value.value
         assert found_timeout is not None, "timeout kwarg not found in _run_pre_push_tests subprocess.run call"
-        assert found_timeout >= 180, (
+        assert found_timeout >= 180, (  # ty: ignore[unsupported-operator]
             f"_run_pre_push_tests timeout is {found_timeout}s — must be >= 180s to avoid "
             "false TESTS_FAILED on the full 2100+ test suite (which takes ~2 minutes). "
             "The original 30s value caused every successful commit to report spurious failures."

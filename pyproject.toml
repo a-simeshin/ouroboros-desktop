@@ -36,7 +36,6 @@ dependencies = [
     "uvicorn[standard]",
     "websockets",
     "pytest>=7.0",
-    "claude-agent-sdk>=0.1.60",
     "a2a-sdk[http-server]>=0.3.20,<1.0.0",
     # Declared explicitly so ``ouroboros/contracts/api_v1.py`` can rely on
     # ``typing_extensions.NotRequired`` on Python 3.10 (``typing.NotRequired``
@@ -55,14 +54,13 @@ Issues = "https://github.com/joi-lab/ouroboros-desktop/issues"
 "Previous Version (Colab)" = "https://github.com/joi-lab/ouroboros"
 
 [project.optional-dependencies]
-claude-sdk = ["claude-agent-sdk>=0.1.60"]
 a2a = ["a2a-sdk[http-server]>=0.3.20,<1.0.0"]
 local-model = ["llama-cpp-python"]
 # ``playwright`` is a test-only dependency: it is no longer used at runtime
 # (browser automation tools were removed), only by the retained UI/E2E smoke
 # tests (test_ui_smoke_playwright.py, test_smoke_e2e_post_refactor.py).
 test = ["testcontainers>=4.0", "pytest-mock>=3.10", "requests", "playwright"]
-all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20,<1.0.0", "llama-cpp-python", "huggingface_hub"]
+all = ["a2a-sdk[http-server]>=0.3.20,<1.0.0", "llama-cpp-python", "huggingface_hub"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

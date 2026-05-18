@@ -270,8 +270,8 @@ def test_tool_policy_covers_all_builtin_tools():
     ``DEFAULT_POLICY = POLICY_CHECK`` and pay an LLM call per invocation, which
     is exactly the friction this refactor is meant to remove.
     """
-    from ouroboros.tools.registry import ToolRegistry
     from ouroboros.safety import TOOL_POLICY
+    from ouroboros.tools.registry import ToolRegistry
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = pathlib.Path(tmp)
@@ -298,10 +298,10 @@ def test_tool_policy_covers_all_builtin_tools():
 def test_tool_policy_values_are_valid():
     """Every TOOL_POLICY value must be one of the three known policy constants."""
     from ouroboros.safety import (
-        TOOL_POLICY,
-        POLICY_SKIP,
         POLICY_CHECK,
         POLICY_CHECK_CONDITIONAL,
+        POLICY_SKIP,
+        TOOL_POLICY,
     )
 
     valid = {POLICY_SKIP, POLICY_CHECK, POLICY_CHECK_CONDITIONAL}
@@ -368,7 +368,7 @@ def test_build_check_prompt_includes_runtime_mode(monkeypatch):
     from ouroboros.safety import _build_check_prompt
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    prompt = _build_check_prompt("claude_code_edit", {"prompt": "edit"})
+    prompt = _build_check_prompt("repo_write", {"prompt": "edit"})
 
     assert "Runtime mode: pro" in prompt
 
@@ -630,7 +630,7 @@ def test_python_m_pytest_still_whitelisted_after_pip_removal():
 def test_check_conditional_is_only_run_shell():
     """POLICY_CHECK_CONDITIONAL currently applies only to run_shell; other
     tools using it would silently bypass the LLM via the shell whitelist."""
-    from ouroboros.safety import TOOL_POLICY, POLICY_CHECK_CONDITIONAL
+    from ouroboros.safety import POLICY_CHECK_CONDITIONAL, TOOL_POLICY
 
     conditional = {n for n, p in TOOL_POLICY.items() if p == POLICY_CHECK_CONDITIONAL}
     assert conditional == {"run_shell"}, (
@@ -852,8 +852,8 @@ def test_no_event_queue_falls_back_to_update_budget_from_usage(monkeypatch):
     attribute spend via ``supervisor.state.update_budget_from_usage`` instead
     of emitting an ``llm_usage`` event — otherwise direct-provider safety
     calls made outside the supervisor context would never be counted."""
-    from ouroboros.safety import check_safety
     import ouroboros.safety as safety_mod
+    from ouroboros.safety import check_safety
 
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "anthropic/claude-sonnet-4.6")
 

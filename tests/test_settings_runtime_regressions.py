@@ -1,6 +1,6 @@
 import asyncio
-import inspect
 import importlib
+import inspect
 import json
 import os
 import pathlib
@@ -461,3 +461,42 @@ def test_get_tool_timeout_prefers_settings_file_over_stale_env(monkeypatch, tmp_
             return 360
 
     assert loop_tool_execution_module._get_tool_timeout(_Tools(), "run_shell") == 888
+
+
+def test_claude_code_model_absent_from_config_and_server_runtime(monkeypatch, tmp_path):
+    """The removed CLAUDE_CODE_MODEL setting must be gone from:
+      1. ouroboros.config.SETTINGS_DEFAULTS
+      2. the env-passthrough list (apply_settings_to_env / env_keys)
+      3. ouroboros.server_runtime model-migration keys
+
+    while the kept blocking-triad enforcement key
+    (OUROBOROS_REVIEW_ENFORCEMENT) must still be passed through to the env.
+    """
+    config_module, _settings_path = _reload_config(monkeypatch, tmp_path)
+
+    # 1. Not a default setting anymore.
+    assert "CLAUDE_CODE_MODEL" not in config_module.SETTINGS_DEFAULTS
+
+    # 2. Not in the settings->env passthrough list, and not in the config
+    #    source at all (defensive — catches any reintroduction).
+    apply_src = inspect.getsource(config_module.apply_settings_to_env)
+    assert "CLAUDE_CODE_MODEL" not in apply_src
+    config_src = inspect.getsource(config_module)
+    assert "CLAUDE_CODE_MODEL" not in config_src
+    # Blocking-triad enforcement key is unrelated and must remain passed through.
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" in apply_src
+
+    # 3. Not referenced anywhere in server_runtime (incl. migration keys /
+    #    retired-default replacements).
+    import ouroboros.server_runtime as server_runtime_module
+
+    server_runtime_module = importlib.reload(server_runtime_module)
+    server_runtime_src = inspect.getsource(server_runtime_module)
+    assert "CLAUDE_CODE_MODEL" not in server_runtime_src
+    retired = getattr(
+        server_runtime_module, "_RETIRED_MODEL_DEFAULT_REPLACEMENTS", {}
+    )
+    assert "CLAUDE_CODE_MODEL" not in retired
+    assert "CLAUDE_CODE_MODEL" not in getattr(
+        server_runtime_module, "_ALL_MODEL_SLOT_KEYS", ()
+    )

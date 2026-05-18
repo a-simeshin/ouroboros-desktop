@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
+
 import pytest
 
 from ouroboros.runtime_mode_policy import protected_path_category
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.tools.registry import ToolEntry
 
 
 def _registry(tmp_path):
@@ -70,7 +70,6 @@ def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
         "repo_write_commit",
         "repo_commit",
         "str_replace_editor",
-        "claude_code_edit",
         "revert_commit",
         "pull_from_remote",
         "restore_to_head",
@@ -192,36 +191,6 @@ def test_pro_mode_allows_protected_write_with_core_patch_notice(tmp_path, monkey
     assert "CORE_PATCH_NOTICE" in result
 
 
-def test_pro_mode_claude_code_edit_emits_core_patch_notice(tmp_path, monkeypatch):
-    repo = _git_repo(tmp_path)
-    (repo / "ouroboros" / "contracts").mkdir(parents=True)
-    (repo / "ouroboros" / "contracts" / "plugin_api.py").write_text("old\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "contracts"], cwd=repo, check=True, capture_output=True)
-
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path)
-
-    def fake_edit(ctx, **_kwargs):
-        (pathlib.Path(ctx.repo_dir) / "ouroboros" / "contracts" / "plugin_api.py").write_text(
-            "new\n",
-            encoding="utf-8",
-        )
-        return "edited"
-
-    reg._entries["claude_code_edit"] = ToolEntry(
-        name="claude_code_edit",
-        schema={"name": "claude_code_edit"},
-        handler=fake_edit,
-    )
-
-    result = reg.execute("claude_code_edit", {"prompt": "edit protected"})
-
-    assert "edited" in result
-    assert "CORE_PATCH_NOTICE" in result
-    assert "ouroboros/contracts/plugin_api.py" in result
-
-
 def test_advanced_commit_blocks_protected_staged_paths(tmp_path, monkeypatch):
     from ouroboros.tools import git as git_mod
 
@@ -236,7 +205,6 @@ def test_advanced_commit_blocks_protected_staged_paths(tmp_path, monkeypatch):
         "test protected commit",
         0.0,
         paths=["BIBLE.md"],
-        skip_advisory_pre_review=True,
     )
 
     assert result["status"] == "blocked"
@@ -257,7 +225,6 @@ def test_advanced_commit_blocks_rename_from_protected_path(tmp_path, monkeypatch
         ctx,
         "rename protected file",
         0.0,
-        skip_advisory_pre_review=True,
     )
 
     assert result["status"] == "blocked"
@@ -288,7 +255,6 @@ def test_pro_commit_uses_normal_review_for_protected_paths(tmp_path, monkeypatch
         "test protected commit",
         0.0,
         paths=["BIBLE.md"],
-        skip_advisory_pre_review=True,
     )
 
     assert result["status"] == "passed"

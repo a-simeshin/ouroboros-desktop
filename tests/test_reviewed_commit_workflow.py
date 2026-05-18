@@ -10,13 +10,8 @@
 
 import json
 import pathlib
-import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from unittest.mock import MagicMock, patch
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # 1. REVIEWED_MUTATIVE_TOOLS classification
@@ -29,7 +24,7 @@ def test_reviewed_mutative_tools_contains_commit_tools():
 
 
 def test_reviewed_mutative_tools_disjoint_from_parallel():
-    from ouroboros.tool_capabilities import REVIEWED_MUTATIVE_TOOLS, READ_ONLY_PARALLEL_TOOLS
+    from ouroboros.tool_capabilities import READ_ONLY_PARALLEL_TOOLS, REVIEWED_MUTATIVE_TOOLS
     assert REVIEWED_MUTATIVE_TOOLS.isdisjoint(READ_ONLY_PARALLEL_TOOLS), \
         "Reviewed mutative tools must not be in the parallel-safe set"
 
@@ -56,7 +51,8 @@ def test_commit_attempt_record_creation():
 
 def test_advisory_review_state_with_commit_attempt():
     from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord, AdvisoryRunRecord,
+        AdvisoryReviewState,
+        CommitAttemptRecord,
     )
     state = AdvisoryReviewState()
     assert state.last_commit_attempt is None
@@ -71,8 +67,10 @@ def test_advisory_review_state_with_commit_attempt():
 
 def test_commit_attempt_serialization_roundtrip(tmp_path):
     from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord, AdvisoryRunRecord,
-        load_state, save_state,
+        AdvisoryReviewState,
+        CommitAttemptRecord,
+        load_state,
+        save_state,
     )
     drive_root = tmp_path
     (drive_root / "state").mkdir(parents=True)
@@ -88,13 +86,6 @@ def test_commit_attempt_serialization_roundtrip(tmp_path):
         duration_sec=15.3,
         task_id="task-42",
     )
-    run = AdvisoryRunRecord(
-        snapshot_hash="abc123",
-        commit_message="v1.0: test",
-        status="fresh",
-        ts="2026-04-02T15:59:00",
-    )
-    state.add_run(run)
 
     save_state(drive_root, state)
     loaded = load_state(drive_root)
@@ -104,8 +95,6 @@ def test_commit_attempt_serialization_roundtrip(tmp_path):
     assert loaded.last_commit_attempt.block_reason == "critical_findings"
     assert loaded.last_commit_attempt.duration_sec == 15.3
     assert loaded.last_commit_attempt.task_id == "task-42"
-    assert len(loaded.runs) == 1
-    assert loaded.runs[0].status == "fresh"
 
 
 def test_commit_attempt_absent_in_old_state(tmp_path):
@@ -156,7 +145,9 @@ def test_legacy_last_commit_migrates_into_attempt_ledger(tmp_path):
 
 def test_format_status_shows_blocked_commit():
     from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord, format_status_section,
+        AdvisoryReviewState,
+        CommitAttemptRecord,
+        format_status_section,
     )
     state = AdvisoryReviewState()
     state.last_commit_attempt = CommitAttemptRecord(
@@ -183,7 +174,9 @@ def test_format_status_shows_blocked_commit():
 
 def test_format_status_shows_failed_commit():
     from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord, format_status_section,
+        AdvisoryReviewState,
+        CommitAttemptRecord,
+        format_status_section,
     )
     state = AdvisoryReviewState()
     state.last_commit_attempt = CommitAttemptRecord(
@@ -202,7 +195,9 @@ def test_format_status_shows_failed_commit():
 
 def test_format_status_hides_succeeded_commit():
     from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord, format_status_section,
+        AdvisoryReviewState,
+        CommitAttemptRecord,
+        format_status_section,
     )
     state = AdvisoryReviewState()
     state.last_commit_attempt = CommitAttemptRecord(
@@ -305,150 +300,6 @@ def test_block_reason_set_for_critical_findings():
         assert ctx._last_review_block_reason == "critical_findings"
 
 
-# ---------------------------------------------------------------------------
-# 5. Enhanced review_status output
-# ---------------------------------------------------------------------------
-
-def test_review_status_shows_commit_attempt():
-    """review_status should include last_commit_attempt in output."""
-    from ouroboros.tools.claude_advisory_review import _handle_review_status
-    from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord, AdvisoryRunRecord,
-        save_state,
-    )
-
-    ctx = MagicMock()
-    ctx.drive_root = "/tmp/fake_status_test"
-    drive_root = pathlib.Path(ctx.drive_root)
-
-    with patch("ouroboros.tools.claude_advisory_review.load_state") as mock_load:
-        state = AdvisoryReviewState()
-        state.last_commit_attempt = CommitAttemptRecord(
-            ts="2026-04-02T16:00:00",
-            commit_message="v1.0: test",
-            status="blocked",
-            block_reason="no_advisory",
-            block_details="No fresh advisory run found",
-            duration_sec=2.1,
-        )
-        mock_load.return_value = state
-
-        result = _handle_review_status(ctx)
-        data = json.loads(result)
-        assert data["last_commit_attempt"] is not None
-        assert data["last_commit_attempt"]["status"] == "blocked"
-        assert data["last_commit_attempt"]["block_reason"] == "no_advisory"
-        assert "BLOCKED" in data["message"]
-        assert "no_advisory" in data["message"]
-
-
-def test_review_status_actionable_message_for_each_reason():
-    """Each block_reason should produce a specific actionable message."""
-    from ouroboros.tools.claude_advisory_review import _handle_review_status
-    from ouroboros.review_state import (
-        AdvisoryReviewState, CommitAttemptRecord,
-    )
-
-    reasons = [
-        "no_advisory", "critical_findings", "review_quorum",
-        "parse_failure", "infra_failure", "scope_blocked", "preflight",
-    ]
-
-    for reason in reasons:
-        ctx = MagicMock()
-        ctx.drive_root = "/tmp/test"
-
-        with patch("ouroboros.tools.claude_advisory_review.load_state") as mock_load:
-            state = AdvisoryReviewState()
-            state.last_commit_attempt = CommitAttemptRecord(
-                ts="2026-04-02T16:00:00",
-                commit_message="test",
-                status="blocked",
-                block_reason=reason,
-            )
-            mock_load.return_value = state
-
-            result = _handle_review_status(ctx)
-            data = json.loads(result)
-            assert reason in data["message"], f"message should mention {reason}"
-
-
-def test_review_status_filters_attempt_and_advisory_history(tmp_path):
-    """Phase 1: review_status should filter history by repo/tool/task/attempt."""
-    from ouroboros.tools.claude_advisory_review import _handle_review_status
-    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, CommitAttemptRecord
-
-    ctx = MagicMock()
-    ctx.drive_root = str(tmp_path)
-    ctx.repo_dir = str(tmp_path)
-
-    state = AdvisoryReviewState()
-    state.advisory_runs = [
-        AdvisoryRunRecord(
-            snapshot_hash="hash-a",
-            commit_message="commit a",
-            status="fresh",
-            ts="2026-04-02T15:00:00",
-            repo_key="repo-a",
-            tool_name="advisory_pre_review",
-            task_id="task-a",
-            attempt=1,
-        ),
-        AdvisoryRunRecord(
-            snapshot_hash="hash-b",
-            commit_message="commit b",
-            status="fresh",
-            ts="2026-04-02T15:05:00",
-            repo_key="repo-b",
-            tool_name="repo_write_commit",
-            task_id="task-b",
-            attempt=2,
-        ),
-    ]
-    state.attempts = [
-        CommitAttemptRecord(
-            ts="2026-04-02T16:00:00",
-            commit_message="attempt a",
-            status="blocked",
-            repo_key="repo-a",
-            tool_name="repo_commit",
-            task_id="task-a",
-            attempt=1,
-        ),
-        CommitAttemptRecord(
-            ts="2026-04-02T16:05:00",
-            commit_message="attempt b",
-            status="failed",
-            repo_key="repo-b",
-            tool_name="repo_write_commit",
-            task_id="task-b",
-            attempt=2,
-            block_reason="infra_failure",
-            phase="infra",
-        ),
-    ]
-    state.last_commit_attempt = state.attempts[-1]
-
-    with patch("ouroboros.tools.claude_advisory_review.load_state", return_value=state), \
-         patch("ouroboros.tools.claude_advisory_review.compute_snapshot_hash", return_value="hash-b"):
-        result = _handle_review_status(
-            ctx,
-            repo_key="repo-b",
-            tool_name="repo_write_commit",
-            task_id="task-b",
-            attempt=2,
-        )
-
-    data = json.loads(result)
-    assert data["filters"]["repo_key"] == "repo-b"
-    assert len(data["advisory_runs"]) == 1
-    assert data["advisory_runs"][0]["commit_message"] == "commit b"
-    assert len(data["attempts"]) == 1
-    assert data["attempts"][0]["tool_name"] == "repo_write_commit"
-    assert data["last_commit_attempt"]["attempt"] == 2
-    assert data["last_commit_attempt"]["repo_key"] == "repo-b"
-
-
 def test_repo_commit_blocks_when_staged_diff_changes_after_review(tmp_path):
     """Phase 2: genuine staged-diff drift must still trigger revalidation failure."""
     from ouroboros.tools.git import _repo_commit_push
@@ -466,7 +317,6 @@ def test_repo_commit_blocks_when_staged_diff_changes_after_review(tmp_path):
          patch("ouroboros.tools.git._release_git_lock"), \
          patch("ouroboros.tools.git._ensure_gitignore"), \
          patch("ouroboros.tools.git._unstage_binaries", return_value=[]), \
-         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
          patch("ouroboros.tools.git._run_parallel_review", return_value=(None, None, "", [])), \
          patch("ouroboros.tools.git._aggregate_review_verdict", return_value=(
              False,
@@ -518,7 +368,6 @@ def test_repo_commit_preserves_blocked_review_findings(tmp_path):
          patch("ouroboros.tools.git._release_git_lock"), \
          patch("ouroboros.tools.git._ensure_gitignore"), \
          patch("ouroboros.tools.git._unstage_binaries", return_value=[]), \
-         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
          patch(
              "ouroboros.tools.git._run_parallel_review",
              return_value=("REVIEW_BLOCKED: critical finding", None, "critical_findings", []),
@@ -543,6 +392,7 @@ def test_repo_commit_preserves_blocked_review_findings(tmp_path):
 def test_repo_commit_scope_block_preserves_scope_findings(tmp_path):
     """Scope-blocked commits must surface scope findings instead of revalidation noise."""
     from types import SimpleNamespace
+
     from ouroboros.tools.git import _repo_commit_push
 
     ctx = MagicMock()
@@ -571,7 +421,6 @@ def test_repo_commit_scope_block_preserves_scope_findings(tmp_path):
          patch("ouroboros.tools.git._release_git_lock"), \
          patch("ouroboros.tools.git._ensure_gitignore"), \
          patch("ouroboros.tools.git._unstage_binaries", return_value=[]), \
-         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
          patch(
              "ouroboros.tools.git._run_parallel_review",
              return_value=(None, scope_result, "", []),
@@ -612,7 +461,6 @@ def test_repo_write_commit_preserves_blocked_review_findings(tmp_path):
     with patch("ouroboros.tools.git._check_overlapping_review_attempt", return_value=None), \
          patch("ouroboros.tools.git._acquire_git_lock", return_value=object()), \
          patch("ouroboros.tools.git._release_git_lock"), \
-         patch("ouroboros.tools.git._invalidate_advisory"), \
          patch(
              "ouroboros.tools.git._run_reviewed_stage_cycle",
              return_value={
@@ -647,7 +495,6 @@ def test_repo_commit_blocks_when_fingerprint_unavailable(tmp_path):
          patch("ouroboros.tools.git._release_git_lock"), \
          patch("ouroboros.tools.git._ensure_gitignore"), \
          patch("ouroboros.tools.git._unstage_binaries", return_value=[]), \
-         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
          patch("ouroboros.tools.git._fingerprint_staged_diff", return_value={
              "ok": False,
              "fingerprint": "",
@@ -670,8 +517,8 @@ def test_repo_commit_blocks_when_fingerprint_unavailable(tmp_path):
 
 def test_late_result_pending_is_persisted_and_cleared(tmp_path):
     """Phase 2: soft-timeout state must persist as late_result_pending until final result arrives."""
-    from ouroboros.tools.commit_gate import _mark_review_attempt_late, _record_commit_attempt
     from ouroboros.review_state import load_state
+    from ouroboros.tools.commit_gate import _mark_review_attempt_late, _record_commit_attempt
 
     ctx = MagicMock()
     ctx.drive_root = str(tmp_path)
@@ -704,8 +551,8 @@ def test_late_result_pending_is_persisted_and_cleared(tmp_path):
 
 def test_repeated_reviewing_updates_reuse_same_attempt_and_leave_no_ghost_active_attempt(tmp_path):
     """Phase 2 regression: one logical reviewed flow must not leave sibling active attempts."""
-    from ouroboros.tools.commit_gate import _check_overlapping_review_attempt, _record_commit_attempt
     from ouroboros.review_state import load_state
+    from ouroboros.tools.commit_gate import _check_overlapping_review_attempt, _record_commit_attempt
 
     ctx = MagicMock()
     ctx.drive_root = str(tmp_path)
@@ -778,13 +625,11 @@ def test_overlap_guard_blocks_active_reviewed_attempt(tmp_path):
 
 def test_overlap_guard_auto_expires_stale_attempt_at_exact_ttl_boundary(tmp_path):
     """Phase 2: overlap guard should expire stale attempts at the exact TTL+grace boundary."""
-    from ouroboros.tools.commit_gate import _check_overlapping_review_attempt, _record_commit_attempt
     from ouroboros.review_state import (
-        _REVIEW_ATTEMPT_GRACE_SEC,
-        _REVIEW_ATTEMPT_TTL_SEC,
         load_state,
         update_state,
     )
+    from ouroboros.tools.commit_gate import _check_overlapping_review_attempt, _record_commit_attempt
 
     ctx = MagicMock()
     ctx.drive_root = str(tmp_path)
@@ -1080,6 +925,7 @@ def test_save_review_continuation_quarantines_corrupt_existing_file(tmp_path):
 
 def test_format_commit_result_renders_structured_advisory_entries():
     from types import SimpleNamespace
+
     from ouroboros.tools.git import _format_commit_result
 
     ctx = SimpleNamespace(
@@ -1111,49 +957,6 @@ def test_reviewed_mutative_import_in_loop():
     """REVIEWED_MUTATIVE_TOOLS should be importable from loop_tool_execution."""
     from ouroboros.loop_tool_execution import REVIEWED_MUTATIVE_TOOLS
     assert "repo_commit" in REVIEWED_MUTATIVE_TOOLS
-
-
-# ---------------------------------------------------------------------------
-# 10. Snapshot hash path scoping (verify existing behavior)
-# ---------------------------------------------------------------------------
-
-def test_snapshot_hash_path_scoping(tmp_path):
-    """compute_snapshot_hash with paths= should only consider those paths."""
-    from ouroboros.review_state import compute_snapshot_hash
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-
-    # Create two files
-    (repo / "a.py").write_text("aaa", encoding="utf-8")
-    (repo / "b.py").write_text("bbb", encoding="utf-8")
-
-    hash_a = compute_snapshot_hash(repo, paths=["a.py"])
-    hash_b = compute_snapshot_hash(repo, paths=["b.py"])
-    hash_ab = compute_snapshot_hash(repo, paths=["a.py", "b.py"])
-
-    assert hash_a != hash_b, "Different paths should produce different hashes"
-    assert hash_a != hash_ab
-    assert hash_b != hash_ab
-
-    # Same paths, same content → same hash
-    hash_a2 = compute_snapshot_hash(repo, paths=["a.py"])
-    assert hash_a == hash_a2
-
-
-def test_snapshot_hash_ignores_commit_message(tmp_path):
-    """commit_message should NOT affect the hash (decoupled per design)."""
-    from ouroboros.review_state import compute_snapshot_hash
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    (repo / "a.py").write_text("content", encoding="utf-8")
-
-    h1 = compute_snapshot_hash(repo, commit_message="msg1", paths=["a.py"])
-    h2 = compute_snapshot_hash(repo, commit_message="msg2", paths=["a.py"])
-    assert h1 == h2
 
 
 def test_update_state_serializes_concurrent_writers(tmp_path):
@@ -1276,7 +1079,7 @@ def test_startup_reconciles_only_stale_reviewing_attempts(tmp_path):
 def test_startup_does_not_touch_terminal_states(tmp_path):
     """verify_system_state must NOT change already-terminal states or fresh reviewing ones."""
     from ouroboros.agent_startup_checks import verify_system_state
-    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, save_state, load_state
+    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, load_state, save_state
 
     class FakeEnv:
         drive_root = str(tmp_path)

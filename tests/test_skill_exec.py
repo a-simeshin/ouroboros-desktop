@@ -9,11 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import pathlib
 import shutil
-import sys
-import tempfile
 import threading
 from unittest.mock import patch
 
@@ -221,7 +218,7 @@ def test_run_shell_script_scan_handles_interpreter_option_values(tmp_path):
 
 def test_skill_exec_tools_have_policy_entries():
     """Every new tool must carry an explicit TOOL_POLICY entry."""
-    from ouroboros.safety import TOOL_POLICY, POLICY_CHECK, POLICY_SKIP
+    from ouroboros.safety import POLICY_CHECK, POLICY_SKIP, TOOL_POLICY
 
     assert TOOL_POLICY["list_skills"] == POLICY_SKIP
     assert TOOL_POLICY["review_skill"] == POLICY_SKIP
@@ -586,7 +583,6 @@ def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
     ("skill_exec", {"skill": "alpha", "script": "hello.py"}),
     ("repo_write", {"path": "x.txt", "content": "x"}),
     ("str_replace_editor", {"path": "x.txt", "old": "a", "new": "b"}),
-    ("claude_code_edit", {"prompt": "edit repo"}),
 ])
 def test_heal_context_blocks_indirect_enable_paths(tool_name, args, tmp_path):
     ctx = _make_ctx(tmp_path)
@@ -751,8 +747,8 @@ def test_heal_review_does_not_reconcile_live_extension(tmp_path, monkeypatch):
 
 
 def test_review_skill_tool_records_lifecycle_job_state_and_events(tmp_path, monkeypatch):
-    from ouroboros.skill_review import SkillReviewOutcome
     import ouroboros.skill_lifecycle_queue as lifecycle_queue
+    from ouroboros.skill_review import SkillReviewOutcome
 
     lifecycle_queue._events.clear()
     lifecycle_queue._active = None
@@ -831,9 +827,9 @@ def test_stale_review_job_is_marked_interrupted(tmp_path, monkeypatch):
 
 
 def test_async_review_cancellation_waits_for_review_thread(tmp_path, monkeypatch):
+    import ouroboros.skill_lifecycle_queue as lifecycle_queue
     from ouroboros.skill_review import SkillReviewOutcome
     from ouroboros.skill_review_runner import run_skill_review_lifecycle
-    import ouroboros.skill_lifecycle_queue as lifecycle_queue
 
     lifecycle_queue._events.clear()
     lifecycle_queue._active = None
@@ -1209,7 +1205,6 @@ def test_toggle_skill_refuses_when_load_error_set(tmp_path, monkeypatch):
     both skills with load_error. ``toggle_skill`` must not mutate state
     for such skills — otherwise the two directories would still end up
     sharing ``enabled.json``."""
-    import os
     skills_root = tmp_path / "skills"
     _build_skill(skills_root, "hello world")
     _build_skill(skills_root, "hello_world")

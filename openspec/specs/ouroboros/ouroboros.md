@@ -1,6 +1,6 @@
 # Спецификация на ouroboros
 
-Версия спецификации - 1.1
+Версия спецификации - 1.2
 
 > Документ описывает **текущее (фактическое) состояние** сервиса по коду на 2026-05-18.
 > Планы и форк-эволюция вынесены в раздел «Известные ограничения и форк-эволюция» (4.6) и не смешиваются с фактическим поведением.
@@ -418,7 +418,7 @@
 #### 2.2.5. <font color="red">**Alt**</font> Запрещённая запись в защищённую поверхность
 
 1. Агент пытается записать файл из защищённой поверхности в неразрешённом runtime-режиме.
-2. Срабатывает sandbox реестра инструментов / `runtime_mode_policy` (правило 2.3.2), запись блокируется или ревертится (`claude_code_edit` revert guard).
+2. Срабатывает sandbox реестра инструментов / `runtime_mode_policy` (правило 2.3.2), запись блокируется или ревертится.
 3. Действие отклонено; инвариант 1.3.2 сохранён.
 
 ### 2.3. Бизнес-правила и логика обработки
@@ -488,7 +488,7 @@
 
 - `TaskResult.status` ∈ `{requested, scheduled, running, completed, rejected_duplicate, failed, interrupted, cancelled}` — отражает технический жизненный цикл исполнения задачи (см. модель 2.7 `TaskResult`);
 - A2A-задача: `status.state` ∈ `{completed, failed, canceled, rejected}`;
-- `AdvisoryReviewState` — внутренняя машина состояния пред-коммитного ревью (runs/attempts/obligations/debts), деталь реализации, не доменный контракт.
+- `AdvisoryReviewState` — внутренний реестр блокирующего пред-коммитного ревью (commit-attempts/obligations/debts/blocking-history), деталь реализации, не доменный контракт.
 
 `TaskResult.status` — **технический жизненный цикл исполнения** (внутренняя реализационная деталь конвейера задач), а не доменная FSM: переходы не несут бизнес-guard-логики, не управляются бизнес-правилами из 2.3 и не являются частью внешнего контракта (A2A-клиент наблюдает лишь терминальное `status.state`). Поэтому эти статусы документируются исключительно как атрибуты моделей данных (2.7) и НЕ выносятся в отдельную доменную FSM.
 
@@ -590,15 +590,11 @@
 - **ClawHub** — `GET /search`, `/info`, `/download`, `/list-versions`; rate-limit retry до 5 раз, max sleep 60 с (хардкод).
 - **OuroborosHub** — `GET /catalog.json`.
 
-#### Claude Code gateway
-
-- **Назначение**: исполнение Bash / чтение файлов / правка кода через Claude Code Runtime; применяются guard'ы пути и read-only-режима (ограничивают доступ к файловой системе по политике, см. правило 2.3.2/2.3.6); таймаут — task-scoped.
-
 #### Шина сообщений (внутренняя)
 
 - `supervisor/message_bus.py` — транспорт супервизор ↔ воркеры ↔ WS-фасад. При недоступности команда WS поглощается (см. 2.2.3).
 
-> Kafka, gRPC, SOAP, реляционная БД и cron-планировщик — **не используются**. Headless-браузер (Playwright/Chromium) как исходящая runtime-интеграция — **не используется**: browser-инструментарий агента (`browse_page`/`browser_action`) и веб-fetch (`web_fetch`/`fetch`) удалены, runtime-зависимости `playwright`/`playwright-stealth` сняты (см. 4.6).
+> Kafka, gRPC, SOAP, реляционная БД и cron-планировщик — **не используются**. Headless-браузер (Playwright/Chromium) как исходящая runtime-интеграция — **не используется**: browser-инструментарий агента (`browse_page`/`browser_action`) и веб-fetch (`web_fetch`/`fetch`) удалены, runtime-зависимости `playwright`/`playwright-stealth` сняты (см. 4.6). Claude Code gateway (Claude Agent SDK) как исходящая runtime-интеграция — **не используется**: инструменты `claude_code_edit`/`advisory_pre_review`, SDK-транспорт и зависимость `claude-agent-sdk` удалены (см. 4.6).
 
 ### 2.7. Модели данных
 
@@ -631,11 +627,10 @@
 | (структура Task) | объект (Pydantic `a2a.types.Task`) | required | Тело задачи |
 | ttl | derived | — | Очистка старше `A2A_TASK_TTL_HOURS` (24 ч) |
 
-#### AdvisoryReviewState (`./.claude/review_state.json`, exclusive lock)
+#### AdvisoryReviewState (`data/state/advisory_review.json`, exclusive lock — историческое имя файла)
 
 | Поле | Тип | Описание |
 |------|-----|----------|
-| runs | List | Запуски ревью |
 | attempts | List | Попытки коммита |
 | obligations | List | Обязательства |
 | blocking_history | List | История блокировок |
@@ -782,6 +777,7 @@ Python `logging`, `RotatingFileHandler` (2 МБ, 3 backup), `logger = logging.ge
 | 14 | Запись TaskResult/A2A/ReviewState | файл записан атомарно (tmp→rename), без частичных файлов (инвариант 1.3.6) |
 | 15 | Превышение таймаута инструмента в фоновом сознании | событие `consciousness_tool_timeout` в `events.jsonl`, цикл продолжается |
 | 16 | Агент запрашивает browser/веб-fetch-инструмент (`browse_page`, `browser_action`, `web_fetch`, `fetch`, `analyze_screenshot`, `vlm_query`) | инструмент отсутствует в реестре и в схемах модели; обращение обслуживается штатной обработкой неизвестного/недоступного инструмента (правило 2.3.6); fallback на веб-fetch отсутствует (см. 4.6) |
+| 17 | Агент запрашивает Claude Code SDK-инструмент (`claude_code_edit`, `advisory_pre_review`) | инструмент отсутствует в реестре и в схемах модели; обращение обслуживается штатной обработкой неизвестного/недоступного инструмента (правило 2.3.6); fallback отсутствует; блокирующая ревью-триада не затронута (см. 4.6) |
 
 ---
 
@@ -800,7 +796,7 @@ Python `logging`, `RotatingFileHandler` (2 МБ, 3 backup), `logger = logging.ge
 Фактическое поведение сервиса:
 
 6. Сетевой доступ контролируется `NetworkAuthGate`: loopback — без пароля; не-loopback — HMAC-SHA256 пароль (`OUROBOROS_NETWORK_PASSWORD`) в заголовке `ouroboros-auth` или cookie. Публичные пути: `/api/health`, `/auth/login`, `/auth/logout`.
-7. Инструменты ограничены многослойной политикой: hardcoded sandbox реестра → `POLICY_SKIP`/`POLICY_CHECK_CONDITIONAL`/`POLICY_CHECK` → `claude_code_edit` revert guard поверх защищённой поверхности.
+7. Инструменты ограничены многослойной политикой: hardcoded sandbox реестра → `POLICY_SKIP`/`POLICY_CHECK_CONDITIONAL`/`POLICY_CHECK` поверх защищённой поверхности.
 8. Запись в защищённую поверхность (BIBLE.md, safety.py, runtime_mode_policy.py, tools/registry.py, .github/workflows/ci.yml, Dockerfile) ограничена runtime-режимом; регистронезависимое сравнение путей.
 9. Секреты в ответе `GET /api/settings` маскируются (`_SECRET_SETTING_KEYS`).
 10. Inbound TLS/mTLS **отсутствует** (расчёт на loopback/LAN); outbound — HTTPS провайдерных SDK и git.
@@ -817,7 +813,6 @@ Python `logging`, `RotatingFileHandler` (2 МБ, 3 backup), `logger = logging.ge
 | A2A_MAX_CONCURRENT | 3 | Параллелизм A2A-задач |
 | Settings lock timeout | 2 с | Ожидание файлового лока settings.json |
 | OpenRouter capabilities timeout | 15000 мс | Хардкод |
-| Claude runtime subprocess | 120000 мс | Настройка окружения |
 | Local model health-check | 10000 мс | Проверка подпроцесса |
 | max.request.size | не задан | Применяются дефолты Starlette (тело не ограничено) |
 
@@ -880,6 +875,8 @@ Python `logging`, `RotatingFileHandler` (2 МБ, 3 backup), `logger = logging.ge
 **Telegram (deprecated, в процессе удаления).** На 2026-05-18 Telegram-канал **фактически присутствует и функционирует** в коде: секрет `TELEGRAM_BOT_TOKEN` входит в маскируемые ключи, существует Telegram-мост, тогл `WEBUI_ONLY` скрывает Telegram-UI и блокирует мост. Это не противоречит разделу 2.8: мост существует сегодня и гейтится `WEBUI_ONLY`, и одновременно помечен как **deprecated и подлежащий полному удалению** (ещё не удалён). Новый код на Telegram-канал опираться не должен; после удаления раздел 2.8 (`WEBUI_ONLY`) и данный пункт подлежат актуализации.
 
 **Playwright / browser-инструменты агента (удалены).** Интеграция агента с headless-браузером Playwright удалена полностью: инструменты `browse_page`, `browser_action`, производный анализ скриншотов (`analyze_screenshot`, `vlm_query`; модуль vision снят целиком) и алиасы `web_fetch`/`fetch` (реализованные поверх `browse_page`) больше не существуют; снята авто-установка Chromium в рантайме и thread-affinity-логика (`stateful_executor`, `cleanup_browser`). Обоснование — сокращение attack surface (произвольная навигация, исполнение JS через `browser_action action=evaluate`, произвольные исходящие HTTP/HTTPS), headless/k8s-окружение, вес и хрупкость бинарников Chromium. Замена не предусмотрена: агент теряет доступ к веб-контенту полностью; запрос удалённого инструмента обслуживается штатной обработкой неизвестного инструмента (правило 2.3.6), без fallback. `playwright` сохраняется **только** как test/dev-зависимость для UI/E2E-тестов веб-UI (сам веб-UI и его клиентский флоу не меняются). Env `PLAYWRIGHT_BROWSERS_PATH` снят из кода и `docs/ENV.md`. Продолжение линии упрощения runtime (ср. удаление PyInstaller/desktop-launcher pipeline).
+
+**Claude Code / Claude Agent SDK интеграция (удалена).** Интеграция с Claude Agent SDK удалена полностью: инструмент делегированной правки `claude_code_edit`, advisory-инструмент пред-коммитного ревью `advisory_pre_review` (`claude_advisory_review.py`), SDK-транспорт (`gateways/claude_code.py`), SDK-валидация рантайма (`claude_runtime.py`), машинерия advisory-прогонов (`AdvisoryRunRecord`/`advisory_runs`/freshness/`skip_advisory_pre_review`), настройка `CLAUDE_CODE_MODEL` и эндпоинты `/api/claude-code/status|install` больше не существуют; runtime-зависимость `claude-agent-sdk` снята из `requirements.txt` и `pyproject.toml`. Обоснование — сокращение attack surface (делегированное исполнение через внешний SDK-субпроцесс, отдельный CLI-рантайм), headless/k8s-окружение, вес и хрупкость. Замена не предусмотрена: запрос удалённого инструмента обслуживается штатной обработкой неизвестного инструмента (правило 2.3.6), без fallback. **Блокирующая ревью-триада сохранена**: `OUROBOROS_REVIEW_ENFORCEMENT` (`advisory`/`blocking`), триада + scope-ревью, obligations/debts/blocking-history не затронуты. Продолжение линии упрощения runtime (ср. удаление Playwright и PyInstaller/desktop-launcher pipeline).
 
 **WEBUI_ONLY — пересмотр семантики.** Текущая семантика: тогл отключает все каналы коммуникации кроме Web UI (на практике — Telegram-мост). Планируется переопределение под появление проприетарных коннекторов как дополнительных каналов.
 

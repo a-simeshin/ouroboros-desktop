@@ -76,6 +76,7 @@ def test_data_read_existing_file_still_read_verbatim(tmp_path):
 
 def test_data_read_propagates_non_filenotfound_errors(tmp_path, monkeypatch):
     import pytest
+
     import ouroboros.tools.core as core_mod
     from ouroboros.tools.core import _data_read
 
@@ -159,18 +160,11 @@ def test_self_check_returns_bool_and_interval_15():
     assert "CHECKPOINT" in messages[0]["content"]
 
 
-def test_advisory_pre_review_results_never_truncated():
-    """advisory_pre_review results must not be truncated (full JSON needed)."""
+def test_multi_model_review_results_never_truncated():
+    """multi_model_review results must not be truncated (full JSON needed)."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "a" * 90000
-    assert _truncate_tool_result(big, "advisory_pre_review") == big
-
-
-def test_review_status_results_never_truncated():
-    """review_status results must not be truncated (full JSON needed)."""
-    from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "b" * 90000
-    assert _truncate_tool_result(big, "review_status") == big
+    assert _truncate_tool_result(big, "multi_model_review") == big
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +174,7 @@ def test_review_status_results_never_truncated():
 def test_repo_read_default_max_lines_is_2000(tmp_path):
     """Default max_lines must be 2000 so ARCHITECTURE.md (~1285 lines) fits in one call."""
     import inspect
+
     from ouroboros.tools.core import _repo_read
     sig = inspect.signature(_repo_read)
     default = sig.parameters["max_lines"].default
@@ -219,9 +214,8 @@ def test_repo_read_can_read_architecture_md_in_one_call(tmp_path):
 
 def test_consciousness_context_includes_architecture_md(tmp_path):
     """BackgroundConsciousness._build_context must include ARCHITECTURE.md section."""
-    import pathlib
     import queue
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
 
     # Minimal fake repo tree
     repo_dir = tmp_path / "repo"
@@ -266,7 +260,7 @@ def test_consciousness_context_includes_architecture_md(tmp_path):
 def test_consciousness_context_architecture_before_knowledge_base(tmp_path):
     """ARCHITECTURE.md section must come before knowledge base in consciousness context."""
     import queue
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
 
     repo_dir = tmp_path / "repo"
     (repo_dir / "docs").mkdir(parents=True)
@@ -309,8 +303,7 @@ def test_consciousness_context_architecture_before_knowledge_base(tmp_path):
 
 def test_triad_review_prompt_includes_architecture_md(tmp_path):
     """Triad review prompt must include ARCHITECTURE.md even when it is not in touched files."""
-    import pathlib
-    from ouroboros.tools.review import _load_architecture_text, _REVIEW_PROMPT_TEMPLATE
+    from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE, _load_architecture_text
     from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION
 
     # Write a fake ARCHITECTURE.md
@@ -366,7 +359,7 @@ def test_consciousness_logs_warning_when_architecture_md_missing(tmp_path):
     Uses a fresh MagicMock() per getLogger call to avoid mutating real logger singletons.
     """
     import queue
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
 
     repo_dir = tmp_path / "repo"
     (repo_dir / "docs").mkdir(parents=True)

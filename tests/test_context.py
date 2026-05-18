@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import pathlib
-import tempfile
 
 from ouroboros.context import build_health_invariants
 
@@ -269,43 +267,13 @@ class TestAdvisoryReviewStatusInContext:
         (tmp_path / "memory" / "scratchpad.md").write_text('x' * 300, encoding="utf-8")
         return FakeEnv()
 
-    def test_advisory_status_in_build_llm_messages(self, tmp_path):
-        """format_status_section returns non-empty string when runs exist."""
-        from ouroboros.review_state import (
-            AdvisoryReviewState, AdvisoryRunRecord, save_state, format_status_section
-        )
-        state = AdvisoryReviewState()
-        state.add_run(AdvisoryRunRecord(
-            snapshot_hash="abc123",
-            commit_message="test commit",
-            status="fresh",
-            ts="2026-01-01T00:00:00",
-            items=[{"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "ok"}],
-        ))
-        save_state(tmp_path, state)
-
-        loaded = __import__("ouroboros.review_state", fromlist=["load_state"]).load_state(tmp_path)
-        section = format_status_section(loaded)
-        assert "Advisory Pre-Review Status" in section
-        assert "FRESH" in section
-        assert "abc123" in section
-
-    def test_advisory_status_empty_when_no_runs(self, tmp_path):
-        """format_status_section returns 'No advisory runs' when state is empty."""
-        from ouroboros.review_state import AdvisoryReviewState, format_status_section
-        state = AdvisoryReviewState()
-        section = format_status_section(state)
-        assert "No advisory runs" in section
-
     def test_review_continuity_context_surfaces_live_gate_and_continuation(self, tmp_path):
         from ouroboros.agent_task_pipeline import build_review_context
         from ouroboros.context import build_llm_messages
         from ouroboros.memory import Memory
         from ouroboros.review_state import (
             AdvisoryReviewState,
-            AdvisoryRunRecord,
             CommitAttemptRecord,
-            compute_snapshot_hash,
             make_repo_key,
             save_state,
         )
@@ -321,20 +289,7 @@ class TestAdvisoryReviewStatusInContext:
         (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
 
         repo_key = make_repo_key(tmp_path / "repo")
-        snapshot_hash = compute_snapshot_hash(tmp_path / "repo")
         state = AdvisoryReviewState()
-        state.add_run(AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message="test commit",
-            status="bypassed",
-            ts="2026-04-07T09:59:00+00:00",
-            repo_key=repo_key,
-            bypass_reason="manual audit override",
-        ))
-        state.advisory_runs[-1].status = "stale"
-        state.last_stale_from_edit_ts = "2026-04-07T10:00:00+00:00"
-        state.last_stale_reason = "claude_code_edit mutated tracked.py"
-        state.last_stale_repo_key = repo_key
         state.record_attempt(CommitAttemptRecord(
             ts="2026-04-07T10:01:00+00:00",
             commit_message="blocked commit",
@@ -388,12 +343,11 @@ class TestAdvisoryReviewStatusInContext:
         )
         dynamic_text = messages[0]["content"][2]["text"]
 
+        # Blocking-triad continuity must surface (no advisory-run gate anymore).
         assert "## Review Continuity" in dynamic_text
         assert "repo_commit_ready=no" in dynamic_text
         assert "retry_anchor=commit_readiness_debt" in dynamic_text
         assert "Commit-readiness debt" in dynamic_text
-        assert "bypass_reason=manual audit override" in dynamic_text
-        assert "stale_marker=2026-04-07T10:00:00" in dynamic_text
         assert "### Open review continuations" in dynamic_text
         assert "critical_finding=tests_affected: Fix the failing test before commit" in dynamic_text
         assert "### Historical review ledger" in dynamic_text
@@ -405,9 +359,7 @@ class TestAdvisoryReviewStatusInContext:
         from ouroboros.agent_task_pipeline import build_review_context
         from ouroboros.review_state import (
             AdvisoryReviewState,
-            AdvisoryRunRecord,
             CommitAttemptRecord,
-            compute_snapshot_hash,
             make_repo_key,
             save_state,
         )
@@ -420,16 +372,8 @@ class TestAdvisoryReviewStatusInContext:
         (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
         (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
 
-        repo_a_key = make_repo_key(repo_a)
         repo_b_key = make_repo_key(repo_b)
         state = AdvisoryReviewState()
-        state.add_run(AdvisoryRunRecord(
-            snapshot_hash=compute_snapshot_hash(repo_a),
-            commit_message="repo a ready",
-            status="fresh",
-            ts="2026-04-07T10:00:00+00:00",
-            repo_key=repo_a_key,
-        ))
         state.record_attempt(CommitAttemptRecord(
             ts="2026-04-07T10:01:00+00:00",
             commit_message="repo b blocked",
@@ -449,6 +393,8 @@ class TestAdvisoryReviewStatusInContext:
         save_state(tmp_path, state)
 
         dynamic_text = build_review_context(env)
+        # repo A has no blocking obligations/debts → ready; repo B's blocked
+        # attempt must not leak into repo A's continuity context.
         assert "repo_commit_ready=yes" in dynamic_text
         assert "foreign_issue" not in dynamic_text
         assert "repo b blocked" not in dynamic_text

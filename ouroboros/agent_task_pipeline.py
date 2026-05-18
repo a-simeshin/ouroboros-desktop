@@ -522,7 +522,6 @@ def build_review_context(env: Any) -> str:
     try:
         from ouroboros.review_state import (
             _LEGACY_CURRENT_REPO_KEY,
-            compute_snapshot_hash,
             format_status_section,
             load_state,
             make_repo_key,
@@ -534,12 +533,10 @@ def build_review_context(env: Any) -> str:
         continuations, corrupt = list_review_continuations(env.drive_root)
         repo_dir = pathlib.Path(env.repo_dir)
         repo_key = make_repo_key(repo_dir)
-        snapshot_hash = compute_snapshot_hash(repo_dir)
         open_obs = state.get_open_obligations(repo_key=repo_key)
         open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
         if (
-            not state.advisory_runs
-            and not state.last_commit_attempt
+            not state.last_commit_attempt
             and not continuations
             and not corrupt
             and not open_obs
@@ -547,40 +544,10 @@ def build_review_context(env: Any) -> str:
         ):
             return ""
 
-        current_run = None
-        for run in reversed(state.advisory_runs):
-            if run.snapshot_hash != snapshot_hash:
-                continue
-            if run.repo_key not in ("", repo_key, _LEGACY_CURRENT_REPO_KEY):
-                continue
-            current_run = run
-            break
-
         lines: List[str] = ["## Review Continuity", "### Live repo gate"]
-        live_status = str(getattr(current_run, "status", "") or "missing")
-        repo_commit_ready = bool(
-            current_run is not None
-            and current_run.status in ("fresh", "bypassed", "skipped")
-            and not open_obs
-            and not open_debts
-        )
+        repo_commit_ready = bool(not open_obs and not open_debts)
         lines.append(f"- repo_key={repo_key}")
-        lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")
-        lines.append(f"- advisory_status={live_status}")
         lines.append(f"- repo_commit_ready={'yes' if repo_commit_ready else 'no'}")
-        if current_run is not None:
-            lines.append(f"- current_review_ts={str(current_run.ts or '')[:19]}")
-            if current_run.bypass_reason:
-                lines.append(f"- bypass_reason={_truncate_with_notice(current_run.bypass_reason, 220)}")
-        else:
-            lines.append("- no advisory run matches the current worktree snapshot")
-
-        stale_matches_repo = not state.last_stale_repo_key or state.last_stale_repo_key == repo_key
-        if state.last_stale_from_edit_ts and stale_matches_repo:
-            lines.append(
-                f"- stale_marker={state.last_stale_from_edit_ts[:19]}: "
-                f"{_truncate_with_notice(state.last_stale_reason or 'worktree edit invalidated advisory freshness', 220)}"
-            )
 
         if open_debts:
             lines.append("- retry_anchor=commit_readiness_debt")
@@ -686,7 +653,7 @@ def build_review_context(env: Any) -> str:
 
         history = format_status_section(state, repo_dir=repo_dir)
         if history:
-            history = history.replace("## Advisory Pre-Review Status", "### Historical review ledger")
+            history = history.replace("## Review Status", "### Historical review ledger")
             lines.append("\n" + history)
 
         return "\n".join(lines)

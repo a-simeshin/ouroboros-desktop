@@ -18,7 +18,6 @@ Defense in depth (unchanged, lives elsewhere):
   - Hardcoded sandbox in ouroboros/tools/registry.py runs BEFORE this
     module and blocks protected runtime paths (safety-critical, frozen contracts,
     release invariants), mutative git via shell, and GitHub repo/auth manipulation.
-  - claude_code_edit post-execution revert/non-pro guard for protected paths; normal commit review remains mandatory.
   - Pre-commit triad + scope review (review.py, scope_review.py).
 
 Returns:
@@ -34,9 +33,9 @@ import os
 import pathlib
 import re
 import shlex
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+from ouroboros.llm import DEFAULT_LIGHT_MODEL, LLMClient
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_provider_from_model
 from ouroboros.tool_aliases import adapt_tool_args, canonical_tool_name
 from supervisor.state import update_budget_from_usage
@@ -157,12 +156,6 @@ TOOL_POLICY: Dict[str, str] = {
     "close_github_issue": POLICY_CHECK,
     "create_github_issue": POLICY_CHECK,
     "a2a_send": POLICY_CHECK,
-
-    # Delegates to the external Claude Agent SDK/CLI: the code actually
-    # mutating the repo runs outside this process, so we keep one cheap LLM
-    # recheck of the call itself. PreToolUse hooks + post-execution revert in
-    # ouroboros/gateways/claude_code.py and registry.py remain as defense in depth.
-    "claude_code_edit": POLICY_CHECK,
 
     # --- Consciousness-only built-ins manually registered outside get_tools() ---
     # (e.g. ouroboros/consciousness.py._build_registry) — must still have an
@@ -580,8 +573,7 @@ def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
 _UNCHECKED_WARNING_SUFFIX = (
     "The tool call was allowed so the agent is not hard-blocked on a misconfigured "
     "runtime — the hardcoded sandbox (registry.py SAFETY_CRITICAL_PATHS, mutative-git "
-    "via shell, gh repo/auth) still applies to every tool, and the claude_code_edit "
-    "post-execution revert still applies when the failing call is claude_code_edit."
+    "via shell, gh repo/auth) still applies to every tool."
 )
 
 
@@ -620,9 +612,7 @@ def _run_llm_check(
         # reachable light-model backend exists), a local runtime outage must
         # not turn every unknown-tool call into SAFETY_VIOLATION — that would
         # hard-block the agent on any degraded config. Fail open with a
-        # visible warning; the hardcoded sandbox still applies to every call,
-        # and claude_code_edit's post-execution revert still applies to that
-        # specific tool.
+        # visible warning; the hardcoded sandbox still applies to every call.
         if _use_local_light and _is_local_fallback:
             log.warning(
                 "Safety local-fallback LLM call failed for %s (%s); proceeding with warning",

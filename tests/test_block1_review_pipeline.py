@@ -195,37 +195,11 @@ class TestIsProbablyBinary:
         assert mod._is_probably_binary(f) is False
 
 
-class TestAdvisoryDiffSizeGate:
-    """Advisory must hard-fail (not truncate) when staged diff exceeds 500K chars."""
+class TestParseChangedPaths:
+    """parse_changed_paths_from_porcelain[_z] must resolve renames correctly.
 
-    def test_oversized_diff_returns_error_sentinel(self, tmp_path):
-        """_get_staged_diff must return a ⚠️ ADVISORY_ERROR string for diffs >500K chars."""
-        import subprocess
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        (tmp_path / "big.py").write_text("x" * 600_000, encoding="utf-8")
-        subprocess.run(["git", "add", "big.py"], cwd=str(tmp_path), capture_output=True)
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        result = adv._get_staged_diff(tmp_path)
-        assert result.startswith("⚠️ ADVISORY_ERROR:")
-        assert "500" in result or "split" in result.lower()
-
-    def test_path_scoped_changed_file_list(self, tmp_path):
-        """_get_changed_file_list(paths=...) must return only the scoped paths."""
-        import subprocess
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        (tmp_path / "unrelated.py").write_text("x = 1\n", encoding="utf-8")
-        (tmp_path / "target.py").write_text("SCOPED = 1\n", encoding="utf-8")
-        subprocess.run(["git", "add", "unrelated.py", "target.py"],
-                       cwd=str(tmp_path), capture_output=True)
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        # Without paths: both files appear
-        full = adv._get_changed_file_list(tmp_path)
-        assert "unrelated.py" in full
-        assert "target.py" in full
-        # With paths=['target.py']: only scoped file
-        scoped = adv._get_changed_file_list(tmp_path, paths=["target.py"])
-        assert "target.py" in scoped
-        assert "unrelated.py" not in scoped
+    (The Claude-SDK advisory diff-size gate was removed; its tests are gone.
+    The porcelain path parsing helpers below are shared blocking-triad code.)"""
 
     def test_parse_changed_paths_preserves_literal_arrow_filename(self):
         """A normal filename containing ` -> ` must not be treated as a rename."""
@@ -244,41 +218,6 @@ class TestAdvisoryDiffSizeGate:
         helpers = _get_module("ouroboros.tools.review_helpers")
         changed = b"R  docs/NEW.md\0docs/OLD.md\0"
         assert helpers.parse_changed_paths_from_porcelain_z(changed) == ["docs/NEW.md"]
-
-    def test_path_scoped_diff_ignores_large_unrelated_file(self, tmp_path):
-        """When paths= is given, _get_staged_diff must scope to those paths only.
-
-        A huge unrelated staged file must not trigger the 500K hard-fail when
-        the advisory is scoped to a different small file.
-        """
-        import subprocess
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        # Stage a huge file (would trigger global hard-fail)
-        (tmp_path / "huge_unrelated.py").write_text("x" * 600_000, encoding="utf-8")
-        # Stage a small targeted file
-        (tmp_path / "small_target.py").write_text("SCOPED_MARKER = 1\n", encoding="utf-8")
-        subprocess.run(["git", "add", "huge_unrelated.py", "small_target.py"],
-                       cwd=str(tmp_path), capture_output=True)
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        # Without paths: should error (huge file in scope)
-        unscoped = adv._get_staged_diff(tmp_path)
-        assert unscoped.startswith("⚠️ ADVISORY_ERROR:")
-        # With paths=['small_target.py']: must NOT error
-        scoped = adv._get_staged_diff(tmp_path, paths=["small_target.py"])
-        assert not scoped.startswith("⚠️ ADVISORY_ERROR:")
-        assert "SCOPED_MARKER" in scoped
-
-    def test_normal_diff_returned_in_full(self, tmp_path):
-        """_get_staged_diff must return the full diff when under 500K chars."""
-        import subprocess
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        content = "UNIQUE_MARKER_12345 = 42\n" * 100
-        (tmp_path / "mod.py").write_text(content, encoding="utf-8")
-        subprocess.run(["git", "add", "mod.py"], cwd=str(tmp_path), capture_output=True)
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        result = adv._get_staged_diff(tmp_path)
-        assert "UNIQUE_MARKER_12345" in result
-        assert result.startswith("⚠️") is False
 
 
 class TestRepoWriteCommitScopeReview:
@@ -492,7 +431,7 @@ class TestFullRepoPackFailClosed:
     def test_raises_on_git_failure(self, tmp_path):
         """If git ls-files fails, build_full_repo_pack raises RuntimeError."""
         import subprocess
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
         rh = _get_module("ouroboros.tools.review_helpers")
         # Simulate git ls-files returning non-zero
         mock_result = MagicMock()
@@ -612,7 +551,9 @@ class TestPathTraversalGuard:
 
     def test_symlink_escape_rejected_by_full_repo_pack(self, tmp_path):
         """build_full_repo_pack must not include content from a tracked symlink pointing outside the repo."""
-        import subprocess, os, tempfile
+        import os
+        import subprocess
+        import tempfile
         repo = self._setup_repo(tmp_path)
         rh = _get_module("ouroboros.tools.review_helpers")
         # Create a secret file outside the repo
@@ -635,7 +576,9 @@ class TestPathTraversalGuard:
 
     def test_symlink_escape_rejected_by_build_review_pack(self, tmp_path):
         """build_review_pack (deep_self_review) must not include content from a tracked symlink pointing outside."""
-        import subprocess, os, tempfile
+        import os
+        import subprocess
+        import tempfile
         repo = self._setup_repo(tmp_path)
         dsr = _get_module("ouroboros.deep_self_review")
         # Create a secret file outside the repo
@@ -656,24 +599,3 @@ class TestPathTraversalGuard:
             os.unlink(outside_secret)
 
 
-class TestPathScopedAdvisoryHandler:
-    """Advisory pre-review handler must scope changed-file list to paths=."""
-
-    def test_changed_file_list_scoped_to_paths(self, tmp_path):
-        """_get_changed_file_list(paths=...) excludes unrelated changed files."""
-        import subprocess
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "config", "user.email", "t@t.com"],
-                       cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "config", "user.name", "T"],
-                       cwd=str(tmp_path), capture_output=True)
-        (tmp_path / "unrelated.py").write_text("u = 1\n")
-        (tmp_path / "target.py").write_text("SCOPED = 1\n")
-        subprocess.run(["git", "add", "unrelated.py", "target.py"],
-                       cwd=str(tmp_path), capture_output=True)
-        adv = _get_module("ouroboros.tools.claude_advisory_review")
-        full = adv._get_changed_file_list(tmp_path)
-        assert "unrelated.py" in full and "target.py" in full
-        scoped = adv._get_changed_file_list(tmp_path, paths=["target.py"])
-        assert "target.py" in scoped
-        assert "unrelated.py" not in scoped

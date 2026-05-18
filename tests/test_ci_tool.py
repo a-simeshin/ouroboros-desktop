@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import types
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -97,8 +94,9 @@ class TestGhApi:
             assert data["id"] == 1
 
     def test_http_error(self):
-        from ouroboros.tools.ci import _gh_api
         import urllib.error
+
+        from ouroboros.tools.ci import _gh_api
         err = urllib.error.HTTPError(
             url="https://api.github.com/test",
             code=404,
@@ -271,8 +269,9 @@ class TestRunCiTests:
 
 class TestNetworkErrorHandling:
     def test_url_error_returns_zero(self):
-        from ouroboros.tools.ci import _gh_api
         import urllib.error
+
+        from ouroboros.tools.ci import _gh_api
         err = urllib.error.URLError("DNS lookup failed")
         with patch("urllib.request.urlopen", side_effect=err):
             status, data = _gh_api("GET", "/repos/test/test", "token123")
@@ -303,8 +302,9 @@ class TestRedirectHandler:
     """Verify _NoAuthRedirectHandler strips Authorization on cross-domain redirects."""
 
     def test_strips_auth_on_cross_domain(self):
-        from ouroboros.tools.ci import _NoAuthRedirectHandler
         import urllib.request
+
+        from ouroboros.tools.ci import _NoAuthRedirectHandler
 
         handler = _NoAuthRedirectHandler()
         # Original request to github.com
@@ -320,8 +320,9 @@ class TestRedirectHandler:
         assert new_req.get_header("Authorization") is None
 
     def test_keeps_auth_on_same_domain(self):
-        from ouroboros.tools.ci import _NoAuthRedirectHandler
         import urllib.request
+
+        from ouroboros.tools.ci import _NoAuthRedirectHandler
 
         handler = _NoAuthRedirectHandler()
         orig_req = urllib.request.Request("https://api.github.com/repos/o/r/actions/jobs/1/logs")
@@ -599,7 +600,6 @@ class TestCiStatusWiring:
         ctx = self._make_ctx(tmp_path)
 
         # Stub out everything except the ci_note wiring
-        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
         monkeypatch.setattr(git_mod, "_run_reviewed_stage_cycle",
                             lambda *a, **kw: {"status": "passed",
                                               "pre_fingerprint": {}, "post_fingerprint": {}})
@@ -626,7 +626,6 @@ class TestCiStatusWiring:
 
         ctx = self._make_ctx(tmp_path)
 
-        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
         monkeypatch.setattr(git_mod, "_run_reviewed_stage_cycle",
                             lambda *a, **kw: {"status": "passed",
                                               "pre_fingerprint": {}, "post_fingerprint": {}})
@@ -655,12 +654,10 @@ class TestCiStatusWiring:
         """Common monkeypatches for _repo_write_commit wiring tests."""
         # Write a file so repo_write_commit has something to stage
         (tmp_path / "x.py").write_text("pass\n")
-        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
         monkeypatch.setattr(git_mod, "_run_reviewed_stage_cycle",
                             lambda *a, **kw: {"status": "passed",
                                               "pre_fingerprint": {}, "post_fingerprint": {}})
         monkeypatch.setattr(git_mod, "_record_commit_attempt", lambda *a, **kw: None)
-        monkeypatch.setattr(git_mod, "_invalidate_advisory", lambda *a, **kw: None)
         monkeypatch.setattr(git_mod, "_post_commit_result", lambda *a, **kw: None)
         monkeypatch.setattr(git_mod, "_auto_tag_on_version_bump", lambda *a, **kw: "")
         monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda *a, **kw: tmp_path / "git.lock")

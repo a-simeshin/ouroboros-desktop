@@ -1,4 +1,4 @@
-"""Shell tools: run_shell, claude_code_edit."""
+"""Shell tools: run_shell."""
 
 from __future__ import annotations
 
@@ -13,14 +13,12 @@ import signal
 import subprocess
 import sys
 import threading
-from subprocess import Popen, CompletedProcess
-from typing import Any, Dict, List
+from subprocess import CompletedProcess, Popen
+from typing import List
 
-from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, subprocess_new_group_kwargs
 from ouroboros.config import load_settings
-from ouroboros.tools.commit_gate import _invalidate_advisory
+from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -331,8 +329,6 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         candidate = (ctx.repo_dir / cwd).resolve()
         if candidate.exists() and candidate.is_dir():
             work_dir = candidate
-    repo_root = _resolve_git_root(pathlib.Path(work_dir))
-    before_changed = _status_snapshot(repo_root)
 
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC)
     try:
@@ -346,14 +342,6 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",
                 res,
-            )
-        after_changed = _status_snapshot(repo_root)
-        if after_changed != before_changed:
-            _invalidate_advisory(
-                ctx,
-                changed_paths=after_changed or before_changed,
-                mutation_root=repo_root,
-                source_tool="run_shell",
             )
         return f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
     except subprocess.TimeoutExpired:
@@ -437,121 +425,6 @@ def _run_validation(repo_dir: pathlib.Path) -> str:
         return f"ERROR: validation failed: {e}"
 
 
-# ---------------------------------------------------------------------------
-# claude_code_edit — SDK-only path
-# ---------------------------------------------------------------------------
-
-def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
-                      budget: float = 5.0, validate: bool = False) -> str:
-    """Delegate code edits via the Claude Agent SDK gateway.
-
-    Uses the claude-agent-sdk Python package with PreToolUse safety hooks
-    that block writes outside cwd and to protected runtime paths.
-    """
-    from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
-
-    work_dir = str(ctx.repo_dir)
-    if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
-        if candidate.exists():
-            work_dir = str(candidate)
-    work_dir_path = pathlib.Path(work_dir).resolve()
-    target_repo_root = _resolve_git_root(work_dir_path) or pathlib.Path(ctx.repo_dir)
-    before_changed = _status_snapshot(target_repo_root)
-
-    from ouroboros.gateways.claude_code import resolve_claude_code_model
-    model = resolve_claude_code_model()
-
-    lock = _acquire_git_lock(ctx)
-    try:
-        try:
-            run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception as e:
-            return f"⚠️ GIT_ERROR (checkout): {e}"
-
-        ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
-
-        try:
-            from ouroboros.gateways.claude_code import (
-                DEFAULT_CLAUDE_CODE_MAX_TURNS,
-                run_edit,
-            )
-
-            system_prompt = (
-                f"STRICT: Only modify files inside {work_dir}. "
-                f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
-                + _load_project_context(pathlib.Path(ctx.repo_dir))
-            )
-
-            result = run_edit(
-                prompt=prompt,
-                cwd=work_dir,
-                model=model,
-                max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
-                budget=budget,
-                system_prompt=system_prompt,
-            )
-
-            result.changed_files = _get_changed_files(target_repo_root)
-            result.diff_stat = _get_diff_stat(target_repo_root)
-
-            if validate and result.success:
-                result.validation_summary = _run_validation(target_repo_root)
-
-            if result.cost_usd > 0:
-                ctx.pending_events.append({
-                    "type": "llm_usage",
-                    "provider": "claude_agent_sdk",
-                    "model": model,
-                    "api_key_type": "anthropic",
-                    "model_category": "claude_code",
-                    "usage": result.usage or {"cost": result.cost_usd},
-                    "cost": result.cost_usd,
-                    "source": "claude_code_edit",
-                    "ts": utc_now_iso(),
-                    "category": "task",
-                })
-
-            if not result.success:
-                return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
-
-            after_changed = _status_snapshot(target_repo_root)
-            if after_changed != before_changed:
-                _invalidate_advisory(
-                    ctx,
-                    changed_paths=result.changed_files or after_changed or before_changed,
-                    mutation_root=target_repo_root,
-                    source_tool="claude_code_edit",
-                )
-
-            return result.to_tool_output()
-
-        except ImportError:
-            return (
-                "⚠️ CLAUDE_CODE_UNAVAILABLE: claude-agent-sdk not installed. "
-                "Install: pip install 'ouroboros[claude-sdk]'"
-            )
-        except Exception as e:
-            import sys
-            sdk_version = "(unknown)"
-            try:
-                import importlib.metadata
-                sdk_version = importlib.metadata.version("claude-agent-sdk")
-            except Exception:
-                pass
-            return (
-                f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}\n"
-                f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
-            )
-
-    finally:
-        _release_git_lock(lock)
-
-
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("run_shell", {
@@ -583,22 +456,4 @@ def get_tools() -> List[ToolEntry]:
                 },
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
-        ToolEntry("claude_code_edit", {
-            "name": "claude_code_edit",
-            "description": (
-                "Delegate code edits to Claude Code (via Agent SDK with safety guards). "
-                "Prefer this for anything beyond one exact replacement: large single-file "
-                "edits, repeated coordinated edits, multi-hunk work, multi-file changes, "
-                "renames/signature changes, or uncertain scope. Prefer it over chaining "
-                "many str_replace_editor calls. Follow with repo_commit."
-            ),
-            "parameters": {"type": "object", "properties": {
-                "prompt": {"type": "string"},
-                "cwd": {"type": "string", "default": ""},
-                "budget": {"type": "number",
-                           "description": "Max USD for this Claude Code call. Default: 5.0"},
-                "validate": {"type": "boolean", "default": False,
-                             "description": "Run post-edit validation (tests). Returns summary in result."},
-            }, "required": ["prompt"]},
-        }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
     ]

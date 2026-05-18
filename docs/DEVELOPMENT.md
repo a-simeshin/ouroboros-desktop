@@ -64,10 +64,9 @@ When a Gateway exists, it should follow these guidelines:
 - Error handling: translates platform-specific errors into consistent return values.
 - Stateless where possible.
 
-**Existing Gateways:**
-- `ouroboros/gateways/claude_code.py` — Claude Agent SDK gateway. Two paths: `run_edit`
-  (edit mode with PreToolUse safety hooks) and `run_readonly` (advisory review, no
-  mutating tools). Structured `ClaudeCodeResult` output.
+No Gateways currently ship — tools call their external APIs / filesystem / subprocess
+directly. Reintroduce the `ouroboros/gateways/` boundary if a future integration needs a
+thin transport adapter.
 
 ### Relationship Between Entities
 
@@ -119,7 +118,6 @@ Concrete requirements:
 | Triad review (`tools/review.py`) | ✅ via preamble | ✅ via `_load_architecture_text` | ✅ via `_load_dev_guide_text` |
 | ↳ Anti-thrashing (v4.35.1) | — | — | Open obligations loaded from `review_state` via `load_state(drive_root)` + `make_repo_key(repo_dir)`, injected unconditionally into `_build_review_history_section` prompt context. Same mechanism in `scope_review.py::_build_scope_prompt` (best-effort when `drive_root` available). |
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full | — (not yet required) |
-| Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `_load_doc` | ✅ via `_load_doc` | ✅ via `_load_doc` |
 | Scope review (`tools/scope_review.py`) | via full repo pack | via full repo pack | via full repo pack |
 | Deep self-review (`deep_self_review.py`) | via full repo pack | via full repo pack | via full repo pack |
 
@@ -151,24 +149,11 @@ engineering standards, you MUST:
 
 ## Review & Commit Protocol
 
-Reviewed commits now have an explicit **two-step gate**:
+Reviewed commits run a single **blocking pre-commit review gate**:
 
-1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
-   Without a bypass, `repo_commit` / `repo_write_commit` require a fresh matching
-   advisory run, no open obligations from earlier blocked rounds, and no open
-   commit-readiness debt. Any edit after advisory makes it stale and requires a
-   re-run. When debt remains, `review_status` reports `repo_commit_ready=false`
-   plus `retry_anchor=commit_readiness_debt` so the next retry starts from the
-   repeated root cause rather than one obligation at a time. `skip_advisory_pre_review=True`
-   is an **absolute** escape hatch: it short-circuits the entire commit gate
-   after writing an audit entry to `events.jsonl`. Open obligations and open
-   commit-readiness debt stay visible in `review_status` (`repo_commit_ready`
-   stays `false`) but do NOT block the bypassed commit. Use bypass when advisory
-   cannot run (provider outage, rate limit) or when the stale signals are known
-   to be obsolete; in both cases subsequent `on_successful_commit()` clears
-   them automatically.
-2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
-   runs two reviewers in parallel on the exact staged snapshot:
+- **Unified pre-commit review**: finish all edits, then call `repo_commit` /
+  `repo_write_commit`. The reviewed commit path runs two reviewers in parallel on
+  the exact staged snapshot:
    - **Triad review** (`ouroboros/tools/review.py`): at least 2 reviewer
      models (as configured in `OUROBOROS_REVIEW_MODELS`; ships with 3, hard
      cap `_handle_multi_model_review.MAX_MODELS = 10`) review the staged
@@ -177,6 +162,13 @@ Reviewed commits now have an explicit **two-step gate**:
    - **Scope review** (`ouroboros/tools/scope_review.py`): one model reviews
      completeness and cross-module consistency with full-repo context
      (`build_full_repo_pack`).
+
+  The gate also blocks while there are open obligations from earlier blocked rounds
+  or open commit-readiness debt. When debt remains, `review_status` reports
+  `repo_commit_ready=false` plus `retry_anchor=commit_readiness_debt` so the next
+  retry starts from the repeated root cause rather than one obligation at a time.
+  `on_successful_commit()` clears repo-scoped obligations and matching debt on a
+  successful commit.
 
 Both blocking reviewers always run concurrently via `concurrent.futures.ThreadPoolExecutor`
 (orchestrated in `ouroboros/tools/parallel_review.py`). The caller receives one
@@ -188,9 +180,7 @@ single source of truth for review items; do not duplicate or fork checklist poli
 
 Preferred workflow for non-trivial edits: choose the right edit tool first —
 `str_replace_editor` for one exact replacement, `repo_write` for new files or
-intentional full rewrites, and `claude_code_edit` for anything beyond one exact
-replacement — then `advisory_pre_review`, then `repo_commit` immediately on the
-final diff.
+intentional full rewrites — then `repo_commit` immediately on the final diff.
 
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
 the single source of truth (Bible P7: DRY).
@@ -233,7 +223,7 @@ Before every commit, verify the following:
 
 #### Cognitive Artifact Integrity
 - [ ] Cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation. If content must be shortened, include an explicit omission note (e.g. `⚠️ OMISSION NOTE: truncated at N chars`).
-- [ ] `BIBLE.md`, `docs/ARCHITECTURE.md`, and `docs/DEVELOPMENT.md` are **core governance artifacts**. All primary reasoning flows (triad review, consciousness, advisory pre-review, deep review) include them as first-class sections — see the "Core Governance Artifacts" table. If you add a new reasoning flow, it MUST follow this contract, not rely on touched-file inclusions.
+- [ ] `BIBLE.md`, `docs/ARCHITECTURE.md`, and `docs/DEVELOPMENT.md` are **core governance artifacts**. All primary reasoning flows (triad review, consciousness, scope review, deep review) include them as first-class sections — see the "Core Governance Artifacts" table. If you add a new reasoning flow, it MUST follow this contract, not rely on touched-file inclusions.
 
 ---
 

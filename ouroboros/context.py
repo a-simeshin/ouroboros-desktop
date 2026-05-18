@@ -806,16 +806,21 @@ def build_llm_messages(
     else:
         try:
             from ouroboros.review_state import load_state, format_status_section
-            advisory_state = load_state(pathlib.Path(env.drive_root))
-            if advisory_state.runs or advisory_state.last_commit_attempt:
-                advisory_section = format_status_section(
-                    advisory_state,
+            review_state = load_state(pathlib.Path(env.drive_root))
+            if (
+                review_state.last_commit_attempt
+                or review_state.attempts
+                or review_state.open_obligations
+                or review_state.commit_readiness_debts
+            ):
+                review_status_section = format_status_section(
+                    review_state,
                     repo_dir=pathlib.Path(env.repo_dir),
                 )
-                if advisory_section:
-                    dynamic_parts.append(advisory_section)
+                if review_status_section:
+                    dynamic_parts.append(review_status_section)
         except Exception:
-            log.debug("Failed to build advisory review status section", exc_info=True)
+            log.debug("Failed to build review status section", exc_info=True)
 
     dynamic_parts.extend(build_recent_sections(memory, env, task_id=task.get("id", "")))
 

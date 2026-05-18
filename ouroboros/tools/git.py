@@ -28,9 +28,7 @@ from ouroboros.runtime_mode_policy import (
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.commit_gate import (
-    _check_advisory_freshness,
     _check_overlapping_review_attempt,
-    _invalidate_advisory,
     _record_commit_attempt,
 )
 from ouroboros.tools.review_revalidation import handle_revalidation_failure
@@ -209,45 +207,12 @@ def _diff_is_doc_only(staged_paths: List[str]) -> bool:
     return saw_any
 
 
-def _mark_failed_bypass_advisory_stale(
-    ctx: ToolContext,
-    commit_message: str,
-    advisory_paths: Optional[List[str]],
-) -> None:
-    """Prevent a failed bypass preflight from satisfying later freshness checks."""
-    try:
-        from ouroboros.review_state import (
-            compute_snapshot_hash,
-            make_repo_key,
-            update_state,
-            _utc_now,
-        )
-
-        snapshot_hash = compute_snapshot_hash(
-            pathlib.Path(ctx.repo_dir),
-            commit_message,
-            paths=advisory_paths,
-        )
-        repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
-
-        def _mutate(state):
-            state.mark_stale(snapshot_hash)
-            state.last_stale_from_edit_ts = _utc_now()
-            state.last_stale_reason = "tests_preflight_blocked"
-            state.last_stale_repo_key = repo_key
-
-        update_state(pathlib.Path(ctx.drive_root), _mutate)
-    except Exception:
-        log.debug("Failed to stale bypass advisory after preflight block", exc_info=True)
-
-
 def _run_reviewed_stage_cycle(
     ctx: ToolContext,
     commit_message: str,
     commit_start: float,
     *,
     paths: Optional[List[str]] = None,
-    skip_advisory_pre_review: bool = False,
     skip_tests: bool = False,
     goal: str = "",
     scope: str = "",
@@ -335,62 +300,29 @@ def _run_reviewed_stage_cycle(
             "message": msg,
             "block_reason": "core_protection_blocked",
         }
-    advisory_err = _check_advisory_freshness(
-        ctx,
-        commit_message,
-        skip_advisory_pre_review,
-        paths=advisory_paths,
-    )
-    if advisory_err:
-        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-        _record_commit_attempt(
-            ctx,
-            commit_message,
-            "blocked",
-            block_reason="no_advisory",
-            block_details=advisory_err,
-            duration_sec=time.time() - commit_start,
-        )
-        return {
-            "status": "blocked",
-            "message": advisory_err,
-            "block_reason": "no_advisory",
-        }
-
-    # Bypass test preflight gate: when advisory is skipped via
-    # ``skip_advisory_pre_review=True`` OR auto-bypassed because no Anthropic
-    # key is configured, the advisory-side test runner never fires. Without
-    # this gate, broken code could reach the expensive triad + scope review.
-    # Mirror the same pytest preflight here so both bypass paths provide
-    # equivalent coverage.
-    #
-    # Two skip paths layered on top:
-    #   1. ``skip_tests=True`` — explicit caller opt-out. Previously this flag
-    #      was silently ignored when advisory was bypassed (the agent surfaced
-    #      this bug at 16:25:32 after a 39-round commit-loop task).
+    # Pre-review test preflight: run the pytest suite before the expensive
+    # triad + scope review so broken code is caught cheaply first. Two skip
+    # paths layered on top:
+    #   1. ``skip_tests=True`` — explicit caller opt-out.
     #   2. Doc-only diffs — prose `.md`/`.txt`/`.rst` changes outside
     #      ``tests/`` can't affect test behaviour, so running the full
     #      pytest suite is pure overhead. JSON/config files are excluded.
-    #      Disable via
-    #      ``OUROBOROS_PREFLIGHT_DIFF_AWARE=false`` if the heuristic ever
-    #      misfires.
-    _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")
+    #      Disable via ``OUROBOROS_PREFLIGHT_DIFF_AWARE=false`` if the
+    #      heuristic ever misfires.
     _diff_aware = (os.environ.get("OUROBOROS_PREFLIGHT_DIFF_AWARE", "true") or "true").strip().lower() in ("true", "1", "yes")
     _doc_only = _diff_aware and _diff_is_doc_only(classification_paths)
-    if _advisory_bypassed and not skip_tests and not _doc_only:
+    if not skip_tests and not _doc_only:
         try:
             ctx.emit_progress_fn(
-                "Advisory bypassed — running test preflight before triad + scope review..."
+                "Running test preflight before triad + scope review..."
             )
         except Exception:
             pass
         test_err = _run_review_preflight_tests(ctx)
         if test_err:
             msg = (
-                "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before triad + scope review "
-                "when advisory is bypassed.\n"
-                "Fix the failures below, then re-run repo_commit (or drop "
-                "skip_advisory_pre_review=True to run the full advisory flow).\n"
+                "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before triad + scope review.\n"
+                "Fix the failures below, then re-run repo_commit.\n"
                 "Set OUROBOROS_PRE_PUSH_TESTS=0 to skip tests entirely.\n\n"
                 f"{test_err}"
             )
@@ -406,13 +338,12 @@ def _run_reviewed_stage_cycle(
                 block_details=msg,
                 duration_sec=time.time() - commit_start,
             )
-            _mark_failed_bypass_advisory_stale(ctx, commit_message, advisory_paths)
             return {
                 "status": "blocked",
                 "message": msg,
                 "block_reason": "tests_preflight_blocked",
             }
-    elif _advisory_bypassed:
+    elif skip_tests or _doc_only:
         # Skip path: emit a visible progress note so the operator (and the
         # events log) records why preflight didn't run. ``reason`` is the most
         # specific applicable cause.
@@ -424,7 +355,7 @@ def _run_reviewed_stage_cycle(
             _skip_reason = "doc_only"
         try:
             ctx.emit_progress_fn(
-                f"Advisory bypassed — preflight tests skipped ({_skip_reason})."
+                f"Preflight tests skipped ({_skip_reason})."
             )
         except Exception:
             pass
@@ -537,7 +468,6 @@ def _run_non_committing_review_cycle(
     commit_message: str,
     *,
     paths: Optional[List[str]] = None,
-    skip_advisory_pre_review: bool = False,
     goal: str = "",
     scope: str = "",
     review_rebuttal: str = "",
@@ -590,7 +520,6 @@ def _run_non_committing_review_cycle(
             commit_message,
             commit_start,
             paths=paths,
-            skip_advisory_pre_review=skip_advisory_pre_review,
             goal=goal,
             scope=scope,
             review_rebuttal=review_rebuttal,
@@ -982,13 +911,6 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     for e in write_list:
         shrink_warning = _check_shrink_guard(ctx, e["path"], e["content"], force=force)
         if shrink_warning:
-            if written:
-                _invalidate_advisory(
-                    ctx,
-                    changed_paths=written_paths,
-                    mutation_root=pathlib.Path(ctx.repo_dir),
-                    source_tool="repo_write",
-                )
             return shrink_warning
         try:
             target = ctx.repo_path(e["path"])
@@ -997,30 +919,16 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             written.append(f"{e['path']} ({len(e['content'])} chars)")
             written_paths.append(e["path"])
         except Exception as exc:
-            if written:
-                _invalidate_advisory(
-                    ctx,
-                    changed_paths=written_paths,
-                    mutation_root=pathlib.Path(ctx.repo_dir),
-                    source_tool="repo_write",
-                )
             already = ", ".join(written) if written else "(none)"
             return (
                 f"⚠️ FILE_WRITE_ERROR on '{e['path']}': {exc}\n"
                 f"Successfully written before error: {already}"
             )
 
-    _invalidate_advisory(
-        ctx,
-        changed_paths=written_paths,
-        mutation_root=pathlib.Path(ctx.repo_dir),
-        source_tool="repo_write",
-    )
     summary = ", ".join(written)
     result = (
         f"✅ Written {len(written)} file(s): {summary}\n"
-        "Files are on disk but NOT committed. Run repo_commit when ready.\n"
-        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
+        "Files are on disk but NOT committed. Run repo_commit when ready."
     )
     protected_written = protected_paths_in(written_paths)
     if protected_written and mode_allows_protected_write(_current_runtime_mode()):
@@ -1090,17 +998,10 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
         f"{context_start + i + 1:>4}| {line}" for i, line in enumerate(context_lines)
     )
 
-    _invalidate_advisory(
-        ctx,
-        changed_paths=[path],
-        mutation_root=pathlib.Path(ctx.repo_dir),
-        source_tool="str_replace_editor",
-    )
     result = (
         f"✅ Replaced in {path} (line {replacement_line}).\n"
         f"Context:\n{context_preview}\n\n"
-        "File is on disk but NOT committed. Run repo_commit when ready.\n"
-        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
+        "File is on disk but NOT committed. Run repo_commit when ready."
     )
     if is_protected_runtime_path(norm) and mode_allows_protected_write(_current_runtime_mode()):
         result += "\n\n" + core_patch_notice([norm])
@@ -1175,12 +1076,6 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
             write_text(ctx.repo_path(path), content)
         except Exception as e:
             return _fail(f"⚠️ FILE_WRITE_ERROR: {e}")
-        _invalidate_advisory(
-            ctx,
-            changed_paths=[path],
-            mutation_root=pathlib.Path(ctx.repo_dir),
-            source_tool="repo_write_commit",
-        )
         stage_paths = [path]
         if also_stage:
             for extra in also_stage:
@@ -1204,12 +1099,6 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
         )
         if outcome.get("status") != "passed":
             message = str(outcome.get("message", "") or "")
-            if outcome.get("block_reason") == "no_advisory":
-                return (
-                    message + "\n\n"
-                    "Note: the file has been written to disk inside the git lock. "
-                    "Run advisory_pre_review, fix issues, then repo_commit."
-                )
             return message
         pre_fingerprint = outcome.get("pre_fingerprint", {}) or {}
         post_fingerprint = outcome.get("post_fingerprint", {}) or {}
@@ -1255,7 +1144,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        paths: Optional[List[str]] = None,
                        skip_tests: bool = False,
                        review_rebuttal: str = "",
-                       skip_advisory_pre_review: bool = False,
                        goal: str = "",
                        scope: str = "") -> str:
     """Stage, review, and commit files with unified pre-commit review."""
@@ -1346,7 +1234,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             commit_message,
             _commit_start,
             paths=paths,
-            skip_advisory_pre_review=skip_advisory_pre_review,
             skip_tests=skip_tests,
             goal=goal,
             scope=scope,
@@ -1683,7 +1570,7 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("repo_commit", {
             "name": "repo_commit",
             "description": (
-                "Commit already-changed files. Requires a fresh advisory_pre_review run first. "
+                "Commit already-changed files. "
                 "Includes unified pre-commit multi-model review before commit, "
                 "with configurable Advisory/Blocking enforcement, plus blocking scope review."
             ),
@@ -1693,8 +1580,6 @@ def get_tools() -> List[ToolEntry]:
                 "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
                 "review_rebuttal": {"type": "string", "default": "",
                     "description": "If previous commit was blocked by reviewers and you disagree, include counter-argument."},
-                "skip_advisory_pre_review": {"type": "boolean", "default": False,
-                    "description": "Bypass advisory pre-review gate (durably audited). Use only when necessary."},
                 "goal": {"type": "string", "default": "",
                     "description": "High-level goal of this change. Used by scope reviewer to judge completeness."},
                 "scope": {"type": "string", "default": "",

@@ -37,11 +37,12 @@ _MAX_FILE_BYTES = 1_048_576  # 1 MB per-file cap
 TARGET_MODULE_LINES = 1000
 MAX_MODULE_LINES = 1600
 TARGET_FUNCTION_LINES = 150
-# Raised in v4.40.0 from 250 to 300: advisory SDK orchestration
-# (claude_advisory_review._handle_advisory_pre_review at 294 lines) packs a
-# coherent single-call flow whose decomposition would obscure control flow
-# more than the size itself.  Splitting would require an unrelated refactor
-# and is tracked as tech-debt, not a fresh violation.
+# Raised in v4.40.0 from 250 to 300 to absorb a coherent single-call
+# orchestration flow whose decomposition would obscure control flow more
+# than the size itself. Splitting would require an unrelated refactor and
+# is tracked as tech-debt, not a fresh violation. The original advisory
+# pre-review driver that motivated the bump has since been removed; the
+# ceiling is kept to avoid churning unrelated still-oversized functions.
 MAX_FUNCTION_LINES = 300
 # Raised in v4.40.0 from 1160 to 1200: absorbs the ~9 new helper functions
 # introduced by the safety.py policy-based rewrite (_is_secret_key,
@@ -58,8 +59,7 @@ MAX_FUNCTION_LINES = 300
 # _update_obligations_from_attempt, _make_obligation_fingerprint,
 # _looks_like_public_obligation_id, _stable_digest, _normalize_*_key,
 # plus the shared _run_reviewed_stage_cycle / _run_non_committing_review_cycle
-# extraction in tools/git.py and _commit_readiness_debts_payload in
-# claude_advisory_review.py) with headroom for incremental growth.
+# extraction in tools/git.py) with headroom for incremental growth.
 # Phase 3 three-layer refactor adds the external skill surface
 # (``ouroboros/skill_loader.py``, ``ouroboros/skill_review.py``,
 # ``ouroboros/tools/skill_exec.py``) with exception sentinels,
@@ -73,11 +73,6 @@ MAX_FUNCTION_LINES = 300
 # scope; the ceiling bump stays consistent with how MAX_TOTAL_FUNCTIONS
 # has grown through v4.40→v4.47 as each phase shipped.
 MAX_TOTAL_FUNCTIONS = 2000  # v5.7.4: preserves headroom after managed-restart persistence and skill-review/UI growth; next broad structural pass should pay this down by extracting git/review/job-state helpers.
-# v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
-# grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
-# fallback + convergence rule + syntax preflight + reflection decoupling).
-# Splitting is deferred until each surface stabilises.
-#
 # v4.50.0-rc.5 adds server.py: grew past 1600 lines (now 1659) across
 # Phases 2–5 (runtime-mode endpoints, extensions HTTP surface, local
 # model API, plus the LAN hint + Skills toggle + review routes). A split
@@ -89,7 +84,7 @@ MAX_TOTAL_FUNCTIONS = 2000  # v5.7.4: preserves headroom after managed-restart p
 # reviewed-commit staging, doc-only preflight, and dirty-tree checkout
 # pushed the file over the hard gate. This is accepted as short-lived debt;
 # split commit/review orchestration into a helper module in the next tools pass.
-GRANDFATHERED_OVERSIZED_MODULES = {"llm.py", "claude_advisory_review.py", "review_state.py", "server.py", "git.py", "skill_loader.py"}
+GRANDFATHERED_OVERSIZED_MODULES = {"llm.py", "review_state.py", "server.py", "git.py", "skill_loader.py"}
 FUNCTION_COUNT_EXCLUDED_FILES: set[str] = set()
 
 

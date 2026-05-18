@@ -1,10 +1,8 @@
-"""commit_gate.py — Advisory freshness gate and commit-attempt recording.
+"""commit_gate.py — Commit-attempt recording for the blocking review triad.
 
 Extracted from git.py to relieve module-size pressure under P7 Minimalism.
 Provides:
   _record_commit_attempt(ctx, commit_message, status, ...)
-  _invalidate_advisory(ctx)
-  _check_advisory_freshness(ctx, commit_message, skip, paths) -> Optional[str]
 """
 
 from __future__ import annotations
@@ -14,9 +12,6 @@ import pathlib
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext
-from ouroboros.utils import (
-    truncate_review_reason as _truncate_review_reason,
-)
 
 log = logging.getLogger(__name__)
 
@@ -29,8 +24,6 @@ def _attempt_phase(status: str, block_reason: str = "") -> str:
     if status == "reviewing":
         return "review"
     if status == "blocked":
-        if block_reason == "no_advisory":
-            return "advisory_gate"
         if block_reason == "preflight":
             return "preflight"
         return "blocking_review"
@@ -261,25 +254,6 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
         log.warning("Failed to record commit attempt: %s", e)
 
 
-def _invalidate_advisory(
-    ctx: ToolContext,
-    *,
-    changed_paths: Optional[List[str]] = None,
-    mutation_root: Optional[pathlib.Path] = None,
-    source_tool: str = "",
-) -> None:
-    try:
-        from ouroboros.review_state import invalidate_advisory_after_mutation
-        invalidate_advisory_after_mutation(
-            pathlib.Path(ctx.drive_root),
-            mutation_root=mutation_root or pathlib.Path(ctx.repo_dir),
-            changed_paths=changed_paths,
-            source_tool=source_tool or _current_review_tool_name(ctx),
-        )
-    except Exception:
-        pass
-
-
 def _mark_review_attempt_late(
     ctx: ToolContext,
     *,
@@ -340,187 +314,4 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
         f"started={active.started_ts or active.ts}). "  # full ts — no [:19] truncation
         f"Do not start another reviewed attempt for this repo until it finishes or auto-expires "
         f"after {expiration_window}s TTL+grace. Check review_status for current state."
-    )
-
-
-def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
-                              skip_advisory_pre_review: bool = False,
-                              paths: Optional[List[str]] = None) -> Optional[str]:
-    from ouroboros.review_state import (
-        AdvisoryRunRecord,
-        compute_snapshot_hash,
-        load_state,
-        make_repo_key,
-        update_state,
-        _utc_now,
-    )
-    from ouroboros.utils import append_jsonl
-    drive_root = pathlib.Path(ctx.drive_root)
-    repo_dir = pathlib.Path(ctx.repo_dir)
-    repo_key = make_repo_key(repo_dir)
-
-    snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
-    state = load_state(drive_root)
-    open_obs = state.get_open_obligations(repo_key=repo_key)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
-
-    def _render_obligations() -> list[str]:
-        return [
-            f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-            for o in open_obs
-        ]
-
-    def _render_debts() -> list[str]:
-        return [
-            f"  [{debt.debt_id}] {debt.category}: {_truncate_review_reason(debt.summary, limit=80)}"
-            for debt in open_debts
-        ]
-
-    # Pass only when snapshot is fresh AND no open review debt remains.
-    if state.is_fresh(snapshot_hash, repo_key=repo_key) and not open_obs and not open_debts:
-        return None
-
-    if skip_advisory_pre_review:
-        task_id = str(getattr(ctx, "task_id", "") or "")
-        reason = "skip_advisory_pre_review=True passed to repo_commit"
-        try:
-            append_jsonl(ctx.drive_logs() / "events.jsonl", {
-                "ts": _utc_now(), "type": "advisory_pre_review_bypassed",
-                "snapshot_hash": snapshot_hash, "commit_message": commit_message,  # full — no [:200]
-                "bypass_reason": reason, "task_id": task_id,
-            })
-        except Exception:
-            pass
-
-        def _mutate(bypass_state):
-            next_run_attempt = len(
-                bypass_state.filter_advisory_runs(
-                    repo_key=repo_key,
-                    tool_name="advisory_pre_review",
-                    task_id=task_id,
-                )
-            ) + 1
-            bypass_state.add_run(AdvisoryRunRecord(
-                snapshot_hash=snapshot_hash,
-                commit_message=commit_message,
-                status="bypassed",
-                ts=_utc_now(),
-                bypass_reason=reason,
-                bypassed_by_task=task_id,
-                snapshot_paths=paths,
-                repo_key=repo_key,
-                tool_name="advisory_pre_review",
-                task_id=task_id,
-                attempt=next_run_attempt,
-            ))
-
-        update_state(drive_root, _mutate)
-
-        # Bypass is an absolute escape hatch: `skip_advisory_pre_review=True`
-        # short-circuits the commit gate entirely after audit logging. Durable
-        # obligations and commit-readiness debt remain in state (`review_status`
-        # shows `repo_commit_ready=false`), but the bypass flag deliberately
-        # overrides that — it is the documented escape for cases where advisory
-        # cannot run (provider outage, rate limit, etc.). Obligations are
-        # cleared normally by `on_successful_commit()` once the commit lands.
-        return None  # audited bypass
-
-    # Advisory is fresh for this snapshot — check if obligations or debt remain.
-    if state.is_fresh(snapshot_hash, repo_key=repo_key) and (open_obs or open_debts):
-        debt_parts = []
-        if open_obs:
-            debt_parts.append(f"{len(open_obs)} open obligation(s)")
-        if open_debts:
-            debt_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
-        lines = [
-            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory is current (hash={snapshot_hash[:12]}) "
-            f"but {' and '.join(debt_parts)} remain unresolved.\n"
-        ]
-        if open_obs:
-            lines.append("Unresolved obligations:")
-            # No [:N] cap — show all obligations so the agent sees every unresolved item.
-            lines += _render_obligations()
-        if open_debts:
-            lines.append("\nCommit-readiness debt:")
-            # No [:N] cap — show all debts so the agent can start retries from them.
-            lines += _render_debts()
-        lines.append("\nFix the flagged issues and re-run advisory_pre_review so it can verify them PASS.")
-        lines.append("Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited).")
-        return "\n".join(lines)
-
-    matching_run = state.find_by_hash(snapshot_hash, repo_key=repo_key)
-    scoped_runs = state.filter_advisory_runs(repo_key=repo_key)
-    latest = scoped_runs[-1] if scoped_runs else None
-
-    # Explicit parse_failure branch: advisory ran for this snapshot but was unparseable.
-    # Must come before the generic stale branch to avoid misleading "snapshot changed" message.
-    if matching_run and matching_run.status == "parse_failure":
-        obs_section = ""
-        if state.get_open_obligations(repo_key=repo_key):
-            open_obs = state.get_open_obligations(repo_key=repo_key)
-            obs_lines = [f"\nOpen obligations ({len(open_obs)}):"]
-            # No [:N] cap — all obligations shown.
-            obs_lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-                          for o in open_obs]
-            obs_section = "\n".join(obs_lines)
-        return (
-            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Last advisory run for this snapshot returned "
-            f"parse_failure (hash={snapshot_hash[:12]}, ts={matching_run.ts}). "  # full ts
-            f"The advisory ran but its output could not be parsed — re-run it.{obs_section}\n"
-            "Re-run: advisory_pre_review(commit_message='...')\n"
-            "Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited)."
-        )
-
-    # Explicit preflight_blocked branch (v4.39.0): advisory SDK was skipped
-    # because a staged `.py` file has a SyntaxError. The raw_result contains
-    # the concrete file:line:msg; surface that instead of the generic stale
-    # message so the agent sees exactly what to fix.
-    if matching_run and matching_run.status == "preflight_blocked":
-        preflight_detail = (matching_run.raw_result or "").strip()
-        # The sentinel starts with "⚠️ PREFLIGHT_BLOCKED: syntax errors:" and
-        # is already formatted for humans; pass through verbatim.
-        return (
-            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Last advisory run for this snapshot "
-            f"was blocked by the syntax preflight (hash={snapshot_hash[:12]}, "
-            f"ts={matching_run.ts}). The Claude SDK advisory was skipped because a "
-            f"staged `.py` file has a SyntaxError.\n\n"
-            f"{preflight_detail}\n\n"
-            "Re-run after fixing: advisory_pre_review(commit_message='...')"
-        )
-
-    if latest and latest.status == "stale" and state.last_stale_from_edit_ts:
-        stale_reason = (f"Advisory invalidated by worktree edit at "
-                        f"{state.last_stale_from_edit_ts}. Re-run advisory after all edits.")  # full ts
-    elif latest:
-        stale_reason = (f"Latest run: status={latest.status}, hash={latest.snapshot_hash[:12]}, "
-                        f"ts={latest.ts}. Snapshot changed (files edited after advisory ran).")  # full ts
-    else:
-        stale_reason = "No advisory runs recorded yet."
-
-    obs_section = ""
-    if open_obs:
-        lines = [f"\nOpen obligations ({len(open_obs)}):"]
-        # No [:N] cap — all obligations shown so nothing is silently hidden.
-        lines += _render_obligations()
-        lines.append("  → advisory_pre_review will verify each obligation is resolved.")
-        obs_section = "\n".join(lines)
-    debt_section = ""
-    if open_debts:
-        debt_lines = [f"\nCommit-readiness debt ({len(open_debts)}):"]
-        debt_lines += _render_debts()
-        debt_lines.append("  → clear or rebut these debt items before the next reviewed attempt.")
-        debt_section = "\n".join(debt_lines)
-
-    return (
-        f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: No fresh advisory run found for this snapshot "
-        f"(hash={snapshot_hash[:12]}).\n"
-        f"{stale_reason}\n"
-        f"{obs_section}{debt_section}\n\n"
-        "Correct workflow:\n"
-        "  1. Finish ALL edits first\n"
-        "  2. advisory_pre_review(commit_message='your message')   ← run AFTER all edits\n"
-        "  3. repo_commit(commit_message='your message')            ← run IMMEDIATELY after advisory\n\n"
-        "⚠️ Any edit after step 2 makes the advisory stale and requires re-running it.\n\n"
-        "To bypass (will be durably audited):\n"
-        "  repo_commit(commit_message='...', skip_advisory_pre_review=True)"
     )

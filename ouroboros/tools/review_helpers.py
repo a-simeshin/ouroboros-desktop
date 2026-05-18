@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ouroboros.utils import (
     sanitize_tool_result_for_log,
+)
+from ouroboros.utils import (
     truncate_review_artifact as _truncate_review_artifact,
 )
 
@@ -990,47 +992,6 @@ def build_scope_section(scope: str = "") -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Advisory SDK diagnostic helpers (shared with claude_advisory_review.py)
-# ---------------------------------------------------------------------------
-
-def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
-                                     touched_paths: list) -> dict:
-    """Collect runtime diagnostic context for advisory failure messages.
-
-    Includes sdk_version, cli_version, cli_path, python, model, prompt size,
-    and the list of touched paths.  Never raises — returns partial data on error.
-    Called by _run_claude_advisory before and after SDK invocation.
-    """
-    import sys
-
-    diag: dict = {
-        "model": model,
-        "prompt_chars": prompt_chars,
-        "prompt_tokens_approx": max(1, prompt_chars // 4),
-        "touched_paths": touched_paths,
-        "python": sys.executable,
-    }
-    # SDK version
-    try:
-        import importlib.metadata
-        diag["sdk_version"] = importlib.metadata.version("claude-agent-sdk")
-    except Exception:
-        diag["sdk_version"] = "(unavailable)"
-
-    # CLI version and path via compat resolver
-    try:
-        from ouroboros.platform_layer import resolve_claude_runtime
-        rt = resolve_claude_runtime()
-        diag["cli_version"] = getattr(rt, "cli_version", "") or "(unavailable)"
-        diag["cli_path"] = getattr(rt, "cli_path", "") or "(unavailable)"
-    except Exception:
-        diag["cli_version"] = "(unavailable)"
-        diag["cli_path"] = "(unavailable)"
-
-    return diag
-
-
 def check_worktree_version_sync(repo_dir) -> str:
     """Worktree version-sync preflight (non-fatal, non-blocking).
 
@@ -1043,6 +1004,7 @@ def check_worktree_version_sync(repo_dir) -> str:
     """
     import re
     from pathlib import Path as _Path
+
     from ouroboros.tools.release_sync import (
         _normalize_pep440,
         _shields_escape,
@@ -1194,17 +1156,13 @@ def _run_review_preflight_tests(
     ctx: "Any",
     timeout: int = 120,
 ) -> Optional[str]:
-    """Run pytest before an expensive review step (advisory SDK or triad+scope).
+    """Run pytest before the expensive triad + scope review step.
 
     Returns a non-None error string when tests fail, None when tests pass (or
     when the preflight is skipped by env gate / missing tests directory).
 
-    Shared helper used by:
-      * ``claude_advisory_review._run_advisory_tests`` — before the advisory
-        SDK call.
-      * ``git._run_reviewed_stage_cycle`` — before the triad + scope review
-        when advisory was bypassed (``skip_advisory_pre_review=True`` or
-        auto-bypassed with no Anthropic key).
+    Used by ``git._run_reviewed_stage_cycle`` before the triad + scope review
+    so broken code is caught cheaply before the expensive reviewers run.
 
     Respects ``OUROBOROS_PRE_PUSH_TESTS=0`` env gate — same as the post-commit
     runner in git.py — so a single knob disables all test preflight layers.
@@ -1239,32 +1197,3 @@ def _run_review_preflight_tests(
     except Exception as exc:
         logger.warning("_run_review_preflight_tests failed: %s", exc, exc_info=True)
         return f"⚠️ Unexpected error running tests: {exc}"
-
-
-def format_advisory_sdk_error(prefix: str, result_error: str, stderr_tail: str,
-                               session_id: str, diag: dict) -> str:
-    """Format a rich, debuggable advisory error message.
-
-    All diagnostic fields are included so the next `exit 1` can be debugged
-    without guessing.  The format is human-readable and starts with the
-    ⚠️ ADVISORY_ERROR: sentinel so callers can detect it reliably.
-    """
-    lines = [
-        f"⚠️ ADVISORY_ERROR: {prefix}",
-        f"  error          : {result_error}",
-        f"  model          : {diag.get('model', '?')}",
-        f"  sdk_version    : {diag.get('sdk_version', '?')}",
-        f"  cli_version    : {diag.get('cli_version', '?')}",
-        f"  cli_path       : {diag.get('cli_path', '?')}",
-        f"  python         : {diag.get('python', '?')}",
-        f"  prompt_chars   : {diag.get('prompt_chars', '?')}",
-        f"  prompt_tokens  : ~{diag.get('prompt_tokens_approx', '?')}",
-        f"  touched_paths  : {diag.get('touched_paths', [])}",
-    ]
-    if session_id:
-        lines.append(f"  session_id     : {session_id}")
-    if stderr_tail:
-        lines.append("  stderr_tail    :")
-        for ln in stderr_tail.strip().splitlines()[-30:]:
-            lines.append(f"    {ln}")
-    return "\n".join(lines)

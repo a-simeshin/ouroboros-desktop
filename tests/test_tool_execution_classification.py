@@ -16,18 +16,10 @@ def test_executor_failures_are_still_tool_failures():
     assert _is_tool_execution_failure(True, "⚠️ TOOL_TIMEOUT (run_shell): exceeded 120s")
 
 
-def test_shell_and_claude_failures_are_treated_as_tool_failures():
+def test_shell_failures_are_treated_as_tool_failures():
     assert _is_tool_execution_failure(
         True,
         "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=1.\n\nSTDERR:\nboom",
-    )
-    assert _is_tool_execution_failure(
-        True,
-        "⚠️ CLAUDE_CODE_INSTALL_ERROR: unable to install Claude Code.",
-    )
-    assert _is_tool_execution_failure(
-        True,
-        "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set.",
     )
 
 

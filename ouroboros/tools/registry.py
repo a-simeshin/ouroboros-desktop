@@ -10,15 +10,12 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
-import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.runtime_mode_policy import (
     FROZEN_CONTRACT_PATH_PREFIXES,
     PROTECTED_RUNTIME_PATHS,
-    core_patch_notice,
-    is_protected_runtime_path,
     mode_allows_protected_write,
     protected_paths_in,
     protected_write_block_message,
@@ -371,43 +368,6 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
 
 _SHELL_WRAPPERS = frozenset(["bash", "sh", "dash", "zsh", "env"])
 
-def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
-    """After claude_code_edit, revert protected files unless pro mode is active."""
-    if mode_allows_protected_write(runtime_mode):
-        return []
-    try:
-        unstaged_diff = subprocess.run(
-            ["git", "diff", "--name-only"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
-        )
-        staged_diff = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
-        )
-        if unstaged_diff.returncode != 0 and staged_diff.returncode != 0:
-            return []
-        modified = set()
-        if unstaged_diff.returncode == 0:
-            modified.update(unstaged_diff.stdout.strip().splitlines())
-        if staged_diff.returncode == 0:
-            modified.update(staged_diff.stdout.strip().splitlines())
-        reverted = []
-        for rel in sorted(modified):
-            if is_protected_runtime_path(rel):
-                subprocess.run(
-                    ["git", "reset", "HEAD", "--", rel],
-                    cwd=str(repo_dir), capture_output=True, timeout=5,
-                )
-                subprocess.run(
-                    ["git", "checkout", "--", rel],
-                    cwd=str(repo_dir), capture_output=True, timeout=5,
-                )
-                reverted.append(rel)
-        return reverted
-    except Exception:
-        return []
-
-
 def _extract_git_subcommand(cmd_parts: list) -> str:
     """Extract the git subcommand from a parsed command list.
 
@@ -502,7 +462,7 @@ class ToolEntry:
 CORE_TOOL_NAMES = {
     "repo_read", "repo_list", "repo_write", "repo_write_commit", "repo_commit",
     "data_read", "data_list", "data_write",
-    "run_shell", "claude_code_edit",
+    "run_shell",
     "ensure_claude_cli",
     "git_status", "git_diff",
     "pull_from_remote", "restore_to_head", "revert_commit",
@@ -559,7 +519,7 @@ class ToolRegistry:
         )
 
     _FROZEN_TOOL_MODULES = [
-        "a2a", "ci", "claude_advisory_review", "compact_context", "control",
+        "a2a", "ci", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
         "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
         # Phase 3 three-layer refactor: external skill surface
@@ -1260,7 +1220,6 @@ class ToolRegistry:
                 "repo_write_commit",
                 "repo_commit",
                 "str_replace_editor",
-                "claude_code_edit",
                 "revert_commit",
                 "pull_from_remote",
                 "restore_to_head",
@@ -1340,27 +1299,6 @@ class ToolRegistry:
                     f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
                     "change owner-only settings or skill trust state; protected files were restored."
                 )
-
-        # Revert protected files after claude_code_edit unless pro mode is
-        # active; pro-mode commits still require the normal commit review later.
-        if name == "claude_code_edit":
-            reverted = _revert_protected_files(self._ctx.repo_dir, runtime_mode=_runtime_mode)
-            if reverted:
-                result += (
-                    "\n\n⚠️ SAFETY: Reverted modifications to protected files: "
-                    + ", ".join(reverted)
-                )
-            elif mode_allows_protected_write(_runtime_mode):
-                try:
-                    diff = subprocess.run(
-                        ["git", "diff", "--name-only"],
-                        cwd=str(self._ctx.repo_dir), capture_output=True, text=True, timeout=5,
-                    )
-                    protected_matches = protected_paths_in(diff.stdout.splitlines() if diff.returncode == 0 else [])
-                except Exception:
-                    protected_matches = []
-                if protected_matches:
-                    result += "\n\n" + core_patch_notice(protected_matches)
 
         if safety_msg:
             return f"{safety_msg}\n\n---\n{result}"

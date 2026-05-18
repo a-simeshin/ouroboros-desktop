@@ -40,18 +40,41 @@ def test_loop_bootstraps_from_tool_policy():
     assert "schemas(core_only=True)" not in source
 
 
-def test_advisory_tools_in_core_tool_names():
-    """advisory_pre_review and review_status must be core tools."""
-    assert "advisory_pre_review" in CORE_TOOL_NAMES
-    assert "review_status" in CORE_TOOL_NAMES
+def test_claude_code_edit_absent_from_policy():
+    """The removed claude_code_edit tool must be absent from the tool policy
+    and the tool registry — both the full set and the core_only set.
 
-
-def test_advisory_tools_in_initial_schemas():
-    """advisory_pre_review and review_status must appear in initial tool schemas."""
+    Also assert the removed Claude-SDK advisory tools (claude_advisory_review,
+    advisory_pre_review, review_status) are no longer resolvable as tools.
+    """
     registry = _build_registry()
-    names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
-    assert "advisory_pre_review" in names
-    assert "review_status" in names
+
+    full_names = {schema["function"]["name"] for schema in registry.schemas()}
+    core_only_names = {
+        schema["function"]["name"] for schema in registry.schemas(core_only=True)
+    }
+    initial_names = {
+        schema["function"]["name"] for schema in initial_tool_schemas(registry)
+    }
+
+    for removed in (
+        "claude_code_edit",
+        "claude_advisory_review",
+        "advisory_pre_review",
+        "review_status",
+    ):
+        assert removed not in full_names, f"{removed} must be absent from tool registry"
+        assert removed not in core_only_names, (
+            f"{removed} must be absent from the core_only tool set"
+        )
+        assert removed not in initial_names, (
+            f"{removed} must be absent from initial tool schemas"
+        )
+
+    # claude_code_edit must not be advertised by the tool policy surface either.
+    non_core_names = {entry["name"] for entry in list_non_core_tools(registry)}
+    assert "claude_code_edit" not in non_core_names
+    assert "claude_code_edit" not in CORE_TOOL_NAMES
 
 
 def test_heal_skill_tools_are_core_visible_in_initial_schemas():
@@ -75,9 +98,9 @@ def test_enable_tools_does_not_duplicate_active_tool_schemas():
     messages = []
     tool_schemas, _enabled_extra = loop_mod._setup_dynamic_tools(registry, tool_schemas, messages)
 
-    core_result = registry.execute("enable_tools", {"tools": "advisory_pre_review"})
+    core_result = registry.execute("enable_tools", {"tools": "repo_commit"})
     names_after_core = [schema["function"]["name"] for schema in tool_schemas]
-    assert names_after_core.count("advisory_pre_review") == 1
+    assert names_after_core.count("repo_commit") == 1
     assert "already active" in core_result
 
     extra_result = registry.execute("enable_tools", {"tools": "multi_model_review"})

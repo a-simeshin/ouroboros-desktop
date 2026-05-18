@@ -213,46 +213,9 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         })
         .catch(() => { /* about version is best-effort */ });
     let currentSettings = {};
-    let claudeCodePollStarted = false;
-    // v4.33.1 status_label priority fix: even when the user has not configured
-    // ANTHROPIC_API_KEY, we still surface the runtime card when the backend
-    // reports status="error" (e.g. SDK below baseline). Otherwise a version-gate
-    // failure is silently hidden until the user adds a key, which defeats the
-    // whole point of prioritizing error over no_api_key in `status_label`.
-    let claudeRuntimeHasError = false;
     let settingsLoaded = false;
     let settingsBaseline = '';
     let settingsDirty = false;
-
-    function anthropicKeyConfigured() {
-        const input = byId('s-anthropic');
-        if (!input) return Boolean(String(currentSettings.ANTHROPIC_API_KEY || '').trim());
-        if (input.dataset.forceClear === '1') return false;
-        const liveValue = String(input.value || '').trim();
-        if (liveValue) return true;
-        return Boolean(String(currentSettings.ANTHROPIC_API_KEY || '').trim());
-    }
-
-    function shouldShowClaudeRuntimeCard() {
-        // Show when the user has configured an Anthropic key, OR when the
-        // backend has reported a concrete runtime error that the user needs
-        // to see and repair (e.g. SDK below baseline, bundled CLI missing).
-        return anthropicKeyConfigured() || claudeRuntimeHasError;
-    }
-
-    function renderClaudeCodeUi() {
-        const panel = byId('settings-claude-code-panel');
-        const note = byId('settings-claude-code-copy');
-        const button = byId('btn-claude-code-install');
-        const visible = shouldShowClaudeRuntimeCard();
-        if (panel) panel.hidden = !visible;
-        if (note) note.hidden = !visible;
-        if (!visible) return;
-        if (button && button.dataset.busy !== '1' && button.dataset.ready !== '1') {
-            button.disabled = false;
-            button.textContent = 'Repair Runtime';
-        }
-    }
 
     function syncSettingsLoadState() {
         const saveBtn = byId('btn-save-settings');
@@ -307,64 +270,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         setStatus('', 'ok');
     }
 
-    function applyClaudeCodeStatus(payload = {}) {
-        const button = byId('btn-claude-code-install');
-        const status = byId('settings-claude-code-status');
-        const ready = Boolean(payload.ready);
-        const installed = Boolean(payload.installed);
-        const busy = Boolean(payload.busy);
-        const error = String(payload.error || '').trim();
-        // Track backend error state so `shouldShowClaudeRuntimeCard` can
-        // surface the card even without a configured API key.
-        claudeRuntimeHasError = Boolean(error);
-        const message = String(payload.message || '').trim()
-            || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
-        const tone = ready ? 'ok' : (error ? 'error' : (installed ? 'muted' : 'error'));
-        if (status) {
-            status.textContent = message;
-            status.dataset.tone = tone;
-        }
-        if (button) {
-            button.dataset.busy = busy ? '1' : '0';
-            button.dataset.ready = ready ? '1' : '0';
-            button.dataset.installed = installed ? '1' : '0';
-            button.disabled = busy;
-            button.textContent = busy ? 'Repairing...' : (ready ? 'Runtime OK' : 'Repair Runtime');
-        }
-        renderClaudeCodeUi();
-    }
-
-    async function refreshClaudeCodeStatus() {
-        // Always poll the backend — status errors (e.g. SDK below baseline) must
-        // surface even without a configured API key. The backend distinguishes
-        // "no_api_key" from "error" via the v4.33.1 `status_label` priority fix.
-        try {
-            const resp = await fetch('/api/claude-code/status', { cache: 'no-store' });
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-            applyClaudeCodeStatus(data);
-        } catch (error) {
-            applyClaudeCodeStatus({
-                installed: false,
-                ready: false,
-                busy: false,
-                error: String(error?.message || error || ''),
-                message: `Claude runtime status check failed: ${String(error?.message || error || '')}`,
-            });
-        }
-    }
-
-    function startClaudeCodePolling() {
-        if (claudeCodePollStarted) return;
-        claudeCodePollStarted = true;
-        refreshClaudeCodeStatus();
-        setInterval(() => {
-            // Poll unconditionally so a below-baseline SDK stays visible even
-            // after the user clears the Anthropic key.
-            refreshClaudeCodeStatus();
-        }, 3000);
-    }
-
     function applySettings(s) {
         applyInputValue('s-openrouter', s.OPENROUTER_API_KEY);
         applyInputValue('s-openai', s.OPENAI_API_KEY);
@@ -393,7 +298,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
         applyInputValue('s-model-light', s.OUROBOROS_MODEL_LIGHT);
         applyInputValue('s-model-fallback', s.OUROBOROS_MODEL_FALLBACK);
-        applyInputValue('s-claude-code-model', s.CLAUDE_CODE_MODEL);
         byId('s-effort-task').value = s.OUROBOROS_EFFORT_TASK || s.OUROBOROS_INITIAL_REASONING_EFFORT || 'medium';
         byId('s-effort-evolution').value = s.OUROBOROS_EFFORT_EVOLUTION || 'high';
         byId('s-effort-review').value = s.OUROBOROS_EFFORT_REVIEW || 'medium';
@@ -476,14 +380,8 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         setSettingsCleanBaseline();
         closeSettingsModelPickers();
         _renderNetworkHint(data._meta);
-        renderClaudeCodeUi();
         settingsLoaded = true;
         syncSettingsLoadState();
-        // Always start polling so a below-baseline SDK surfaces even before
-        // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now
-        // unconditional, and `shouldShowClaudeRuntimeCard` uses the runtime
-        // error signal to decide visibility.
-        startClaudeCodePolling();
     }
 
     async function reloadSettingsWithFeedback() {
@@ -518,7 +416,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             OUROBOROS_MODEL_CODE: byId('s-model-code').value,
             OUROBOROS_MODEL_LIGHT: byId('s-model-light').value,
             OUROBOROS_MODEL_FALLBACK: byId('s-model-fallback').value,
-            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-6[1m]',
             OUROBOROS_SERVER_HOST: (byId('s-server-host')?.value || '127.0.0.1').trim() || '127.0.0.1',
             OUROBOROS_EFFORT_TASK: byId('s-effort-task').value,
             OUROBOROS_EFFORT_EVOLUTION: byId('s-effort-evolution').value,
@@ -616,14 +513,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             return leave;
         });
     }
-
-    byId('s-anthropic')?.addEventListener('input', () => {
-        renderClaudeCodeUi();
-        if (anthropicKeyConfigured()) {
-            startClaudeCodePolling();
-            refreshClaudeCodeStatus();
-        }
-    });
 
     page.addEventListener('input', updateSettingsDirtyState);
     page.addEventListener('change', updateSettingsDirtyState);
@@ -728,42 +617,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
                 renderSettingsModelPicker(input);
             }
         });
-    });
-
-    page.addEventListener('click', (event) => {
-        if (event.target.closest('.secret-clear[data-target="s-anthropic"]')) {
-            queueMicrotask(() => {
-                renderClaudeCodeUi();
-                refreshClaudeCodeStatus();
-            });
-        }
-    });
-
-    byId('btn-claude-code-install')?.addEventListener('click', async () => {
-        applyClaudeCodeStatus({
-            installed: false,
-            ready: false,
-            busy: true,
-            message: 'Repairing Claude runtime...',
-            error: '',
-        });
-        try {
-            const resp = await fetch('/api/claude-code/install', { method: 'POST' });
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-            applyClaudeCodeStatus(data);
-            setStatus(data.repaired ? 'Claude runtime repaired' : 'Claude runtime up to date', 'ok');
-        } catch (error) {
-            const message = String(error?.message || error || '');
-            applyClaudeCodeStatus({
-                installed: false,
-                ready: false,
-                busy: false,
-                error: message,
-                message: `Claude runtime repair failed: ${message}`,
-            });
-            setStatus('Claude runtime repair failed', 'warn');
-        }
     });
 
     byId('btn-refresh-model-catalog').addEventListener('click', async () => {

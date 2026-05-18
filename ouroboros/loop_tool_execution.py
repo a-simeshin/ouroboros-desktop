@@ -8,36 +8,48 @@ Extracted from loop.py to keep the main loop orchestrator focused.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import logging
 import os
 import pathlib
 import re
 import time
-import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
-
-import logging
 
 from ouroboros.config import load_settings
 from ouroboros.tool_aliases import adapt_tool_args, canonical_tool_name
 from ouroboros.tool_capabilities import (
+    DEFAULT_TOOL_RESULT_LIMIT as _DEFAULT_TOOL_RESULT_LIMIT,
+)
+from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
     REVIEWED_MUTATIVE_TOOLS,
+)
+from ouroboros.tool_capabilities import (
     TOOL_RESULT_LIMITS as _TOOL_RESULT_LIMITS,
-    DEFAULT_TOOL_RESULT_LIMIT as _DEFAULT_TOOL_RESULT_LIMIT,
-    UNTRUNCATED_TOOL_RESULTS as _UNTRUNCATED_TOOL_RESULTS,
+)
+from ouroboros.tool_capabilities import (
     UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
 )
+from ouroboros.tool_capabilities import (
+    UNTRUNCATED_TOOL_RESULTS as _UNTRUNCATED_TOOL_RESULTS,
+)
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
+from ouroboros.utils import (
+    append_jsonl,
+    sanitize_tool_args_for_log,
+    sanitize_tool_result_for_log,
+    truncate_for_log,
+    utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
 
 _FAILURE_PREFIXES = (
     "⚠️ TOOL_",
     "⚠️ SHELL_",
-    "⚠️ CLAUDE_CODE_",
 )
 _EXIT_CODE_RE = re.compile(r"exit_code=(-?\d+)")
 _SIGNAL_RE = re.compile(r"signal=([A-Z0-9_]+)")
@@ -65,8 +77,8 @@ def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:
     """Get timeout for a tool call.
 
     Uses max(settings/env value, per-tool ToolEntry value) so that tools
-    declaring a higher minimum (e.g. claude_code_edit at 1200s) are never
-    silently capped by a lower global default (e.g. 600s).
+    declaring a higher minimum are never silently capped by a lower
+    global default (e.g. 600s).
     """
     settings_val = 0
     try:
@@ -154,14 +166,6 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "non_zero_exit"
     elif text.startswith("⚠️ SHELL_"):
         status = "shell_error"
-    elif text.startswith("⚠️ CLAUDE_CODE_TIMEOUT"):
-        status = "timeout"
-    elif text.startswith("⚠️ CLAUDE_CODE_INSTALL_ERROR"):
-        status = "install_error"
-    elif text.startswith("⚠️ CLAUDE_CODE_UNAVAILABLE"):
-        status = "unavailable"
-    elif text.startswith("⚠️ CLAUDE_CODE_"):
-        status = "claude_code_error"
 
     meta: Dict[str, Any] = {"status": status}
     exit_match = _EXIT_CODE_RE.search(text)

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -160,8 +159,8 @@ class TestPreflightReadmeChangelogRow:
     """Check 6: VERSION staged → staged README.md changelog must have a row for the version."""
 
     def _run(self, version: str, readme_content: str) -> str | None:
-        from ouroboros.tools.review import _preflight_check
         from ouroboros.tools.release_sync import _normalize_pep440
+        from ouroboros.tools.review import _preflight_check
 
         def fake_git_show(repo_dir, path):
             if path == "VERSION":
@@ -563,7 +562,7 @@ class TestObligationGrouping:
 
 
 # ---------------------------------------------------------------------------
-# Advisory worktree version-sync check (_check_worktree_version_sync)
+# Shared severity calibration (blocking-triad finding tagging)
 # ---------------------------------------------------------------------------
 
 def test_shared_calibration_marks_narrative_mismatch_as_advisory():
@@ -575,61 +574,3 @@ def test_shared_calibration_marks_narrative_mismatch_as_advisory():
     assert "advisory" in text
     assert "readme test counts" in text
     assert "release/version metadata" in text or "release" in text
-
-
-class TestAdvisoryWorktreeVersionSync:
-    """Worktree version-sync preflight in the advisory path."""
-
-    def _write_files(self, tmp_path, version, pyproject_ver=None, readme_ver=None, arch_ver=None):
-        from ouroboros.tools.release_sync import _normalize_pep440, _shields_escape
-
-        (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
-        pv = pyproject_ver if pyproject_ver is not None else _normalize_pep440(version)
-        (tmp_path / "pyproject.toml").write_text(f'version = "{pv}"\n', encoding="utf-8")
-        rv = readme_ver if readme_ver is not None else version
-        (tmp_path / "README.md").write_text(
-            f"[![Version {rv}](https://img.shields.io/badge/version-{_shields_escape(rv)}-green.svg)](VERSION)\n",
-            encoding="utf-8",
-        )
-        av = arch_ver if arch_ver is not None else version
-        docs = tmp_path / "docs"
-        docs.mkdir(exist_ok=True)
-        (docs / "ARCHITECTURE.md").write_text(f"# Ouroboros v{av}\n", encoding="utf-8")
-
-    def test_all_in_sync_returns_empty(self, tmp_path):
-        self._write_files(tmp_path, "4.18.0")
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        assert _check_worktree_version_sync(tmp_path) == ""
-
-    def test_pyproject_mismatch_warns(self, tmp_path):
-        self._write_files(tmp_path, "4.18.0", pyproject_ver="4.17.9")
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        result = _check_worktree_version_sync(tmp_path)
-        assert "pyproject.toml" in result
-        assert "4.18.0" in result
-
-    def test_readme_badge_mismatch_warns(self, tmp_path):
-        self._write_files(tmp_path, "4.18.0", readme_ver="4.17.9")
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        result = _check_worktree_version_sync(tmp_path)
-        assert "README.md badge" in result
-
-    def test_architecture_mismatch_warns(self, tmp_path):
-        self._write_files(tmp_path, "4.18.0", arch_ver="4.17.9")
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        result = _check_worktree_version_sync(tmp_path)
-        assert "ARCHITECTURE.md header" in result
-
-    def test_missing_version_file_skips(self, tmp_path):
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        assert _check_worktree_version_sync(tmp_path) == ""
-
-    def test_non_semver_version_skips(self, tmp_path):
-        (tmp_path / "VERSION").write_text("dev\n", encoding="utf-8")
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        assert _check_worktree_version_sync(tmp_path) == ""
-
-    def test_rc_version_with_pep440_pyproject_returns_empty(self, tmp_path):
-        self._write_files(tmp_path, "4.50.0-rc.2")
-        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
-        assert _check_worktree_version_sync(tmp_path) == ""

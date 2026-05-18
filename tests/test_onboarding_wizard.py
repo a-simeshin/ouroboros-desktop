@@ -1,9 +1,6 @@
 import pathlib
 
-import pytest
-
 from ouroboros.onboarding_wizard import build_onboarding_html, prepare_onboarding_settings
-
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -173,47 +170,6 @@ def test_build_onboarding_html_adapts_to_multi_provider_access():
     assert "OPENAI_API_KEY: trim(state.openaiKey)" in html
     assert "ANTHROPIC_API_KEY: trim(state.anthropicKey)" in html
     assert "LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud'" in html
-
-
-def test_build_onboarding_html_includes_claude_runtime_cta_and_host_transports():
-    desktop_html = build_onboarding_html({}, host_mode="desktop")
-    web_html = build_onboarding_html({}, host_mode="web")
-
-    assert "Claude Runtime" in desktop_html or "Claude runtime" in desktop_html
-    assert "Skip for now" in desktop_html
-    assert "window.pywebview.api.claude_code_status" in desktop_html
-    assert "window.pywebview.api.install_claude_code" in desktop_html
-    assert "/api/claude-code/status" in web_html
-    assert "/api/claude-code/install" in web_html
-
-
-def _launcher_has_onboarding_bridge() -> bool:
-    launcher = REPO / "launcher.py"
-    if not launcher.exists():
-        return False
-    source = launcher.read_text(encoding="utf-8")
-    return all(marker in source for marker in (
-        "has_startup_ready_provider(settings)",
-        "prepare_onboarding_settings(data, settings)",
-        'build_onboarding_html(settings, host_mode="desktop")',
-        "def claude_code_status(self) -> dict:",
-        "def install_claude_code(self) -> dict:",
-    ))
-
-_LAUNCHER_HAS_ONBOARDING_BRIDGE = _launcher_has_onboarding_bridge()
-
-@pytest.mark.skipif(
-    not _LAUNCHER_HAS_ONBOARDING_BRIDGE,
-    reason="launcher.py does not contain onboarding bridge (may be an older bundle or post-refactor version)",
-)
-def test_launcher_uses_shared_onboarding_and_claude_cli_bridge():
-    source = (REPO / "launcher.py").read_text(encoding="utf-8")
-
-    assert "has_startup_ready_provider(settings)" in source
-    assert "prepare_onboarding_settings(data, settings)" in source
-    assert 'build_onboarding_html(settings, host_mode="desktop")' in source
-    assert "def claude_code_status(self) -> dict:" in source
-    assert "def install_claude_code(self) -> dict:" in source
 
 
 def test_web_style_contains_onboarding_overlay_shell():

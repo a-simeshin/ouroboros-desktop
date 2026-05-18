@@ -5,11 +5,8 @@ from __future__ import annotations
 import json
 import pathlib
 import subprocess
-import tempfile
 from typing import List
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -742,81 +739,6 @@ class TestCherryPickCommits:
         ).stdout.strip()
         assert status == "", f"Tree not clean after conflict rollback: {status!r}"
 
-    def test_partial_apply_conflict_invalidates_advisory(self, tmp_path):
-        """Partial apply + conflict with stop_on_conflict=True must still invalidate advisory.
-
-        If some commits are applied before a conflict, repo history has changed
-        even though the call returns an error.  Advisory must be invalidated so a
-        later repo_commit cannot rely on pre-cherry-pick review state.
-
-        Setup:
-          - ouroboros has 'shared.py' with content "v_ouroboros"
-          - PR has TWO commits:
-              commit A: adds 'clean.py'  (no conflict — applies cleanly)
-              commit B: changes 'shared.py' to "v_pr"  (conflict with ouroboros version)
-          - Both PR commits are on a branch that diverged BEFORE shared.py was modified
-            on ouroboros, so cherry-picking B onto the integration branch (which has
-            the ouroboros version of shared.py) creates a genuine 3-way conflict.
-        """
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
-
-        # ── Step 1: record the divergence point (HEAD of ouroboros right now) ──
-        base_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
-        ).stdout.strip()
-
-        # ── Step 2: on a detached head from the divergence point, build two
-        #            PR commits ──────────────────────────────────────────────
-        subprocess.run(["git", "checkout", "--detach", base_sha], cwd=repo,
-                       check=True, capture_output=True)
-
-        # Commit A: adds a new file (no conflict)
-        (tmp_path / "clean.py").write_text("result = 42\n")
-        subprocess.run(["git", "add", "clean.py"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "pr: add clean.py"], cwd=repo,
-                       check=True, capture_output=True)
-        good_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
-        ).stdout.strip()
-
-        # Commit B: adds shared.py with content "v_pr"
-        (tmp_path / "shared.py").write_text("v_pr\n")
-        subprocess.run(["git", "add", "shared.py"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "pr: add shared.py"], cwd=repo,
-                       check=True, capture_output=True)
-        conflict_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
-        ).stdout.strip()
-
-        # ── Step 3: back on ouroboros, add shared.py with *different* content ──
-        subprocess.run(["git", "checkout", "ouroboros"], cwd=repo,
-                       check=True, capture_output=True)
-        (tmp_path / "shared.py").write_text("v_ouroboros\n")
-        subprocess.run(["git", "add", "shared.py"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "ouroboros: add shared.py"], cwd=repo,
-                       check=True, capture_output=True)
-
-        # ── Step 4: create integration branch from this ouroboros HEAD ──────
-        subprocess.run(["git", "checkout", "-b", "integrate/pr-partial"], cwd=repo,
-                       check=True, capture_output=True)
-
-        # ── Step 5: call with patch — good_sha applies, conflict_sha conflicts ─
-        from unittest.mock import patch
-        from ouroboros.tools.git_pr import _cherry_pick_pr_commits
-        with patch("ouroboros.tools.git_pr._invalidate_advisory") as mock_inv:
-            result = _cherry_pick_pr_commits(
-                ctx, shas=[good_sha, conflict_sha], stop_on_conflict=True
-            )
-
-        # Must report a conflict
-        assert "⚠️" in result, f"Expected conflict error, got: {result}"
-        # Advisory MUST be invalidated — good_sha was already applied before the conflict
-        assert mock_inv.called, (
-            "advisory must be invalidated on partial apply + conflict; "
-            f"result was: {result!r}"
-        )
-
     def test_stop_on_conflict_false_reports_skipped_shas(self, tmp_path):
         """stop_on_conflict=False: skipped SHAs must appear in the return value."""
         repo = _make_temp_git_repo(tmp_path)
@@ -858,20 +780,6 @@ class TestCherryPickCommits:
         # Result must surface the skipped SHA explicitly — not silent truncation
         assert conflict_sha[:12] in result or "skipped" in result.lower() or "PARTIAL" in result, \
             f"Skipped SHA not reported: {result}"
-
-    def test_invalidates_advisory_after_apply(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
-        shas = self._setup_pr_commits(repo)
-
-        subprocess.run(["git", "checkout", "-b", "integrate/pr-99"], cwd=repo,
-                       check=True, capture_output=True)
-
-        with patch("ouroboros.tools.git_pr._invalidate_advisory") as mock_inv:
-            from ouroboros.tools import git_pr
-            # Reload to pick up patch
-            git_pr._cherry_pick_pr_commits(ctx, shas=shas)
-            mock_inv.assert_called_once()
 
     # -----------------------------------------------------------------
     # override_author tests live in tests/test_git_pr_override_author.py
@@ -1023,8 +931,10 @@ class TestEndToEndPRFlow:
 
         # --- Step 2: create_integration_branch ---
         from ouroboros.tools.git_pr import (
-            _create_integration_branch, _cherry_pick_pr_commits,
-            _stage_adaptations, _stage_pr_merge,
+            _cherry_pick_pr_commits,
+            _create_integration_branch,
+            _stage_adaptations,
+            _stage_pr_merge,
         )
         branch_result = _create_integration_branch(ctx, pr_number=1)
         assert "✅" in branch_result, f"create_integration_branch failed: {branch_result}"
@@ -1218,7 +1128,6 @@ class TestGetPr:
             result = _get_pr(ctx, number=5)
         assert "fetch_pr_ref" in result
         assert "create_integration_branch" in result
-        assert "advisory_pre_review" in result
         assert "override_author" in result, (
             "Integration steps must mention override_author so operators using "
             "get_github_pr learn the v4.35.0 workflow for rewriting placeholder "
@@ -1312,7 +1221,7 @@ class TestGhEnv:
     def test_gh_cmd_passes_env_to_subprocess(self, tmp_path):
         """_gh_cmd passes env to subprocess.run (not relying on ambient auth)."""
         import os
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
         ctx = _make_ctx(tmp_path)
         with patch.dict(os.environ, {"GITHUB_TOKEN": "mytoken"}, clear=False):
             with patch("ouroboros.tools.github.subprocess.run") as mock_run:

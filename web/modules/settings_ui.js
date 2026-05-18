@@ -180,7 +180,7 @@ export function renderSettingsPage() {
                         id: 'anthropic',
                         title: 'Anthropic',
                         icon: '/static/providers/anthropic.png',
-                        hint: 'Direct runtime plus Claude tooling',
+                        hint: 'Direct Anthropic model routing',
                         body: `
                             <div class="form-row">${secretField({
                                 id: 's-anthropic',
@@ -188,12 +188,7 @@ export function renderSettingsPage() {
                                 label: 'Anthropic API Key',
                                 placeholder: 'sk-ant-...',
                             })}</div>
-                            <div class="settings-inline-note">Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.</div>
-                            <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
-                                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Repair Runtime</button>
-                                <span id="settings-claude-code-status" class="settings-inline-status">Checking Claude runtime...</span>
-                            </div>
-                            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</div>
+                            <div class="settings-inline-note">Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic.</div>
                         `,
                     })}
                     <div class="form-section compact">
@@ -242,13 +237,6 @@ export function renderSettingsPage() {
                             ${modelCard({ title: 'Code', copy: 'Tool-heavy coding model.', inputId: 's-model-code', toggleId: 's-local-code', defaultValue: 'anthropic/claude-opus-4.6' })}
                             ${modelCard({ title: 'Light', copy: 'Fast summaries and lightweight tasks.', inputId: 's-model-light', toggleId: 's-local-light', defaultValue: 'anthropic/claude-sonnet-4.6' })}
                             ${modelCard({ title: 'Fallback', copy: 'Resilience and degraded path.', inputId: 's-model-fallback', toggleId: 's-local-fallback', defaultValue: 'anthropic/claude-sonnet-4.6' })}
-                        </div>
-                        <div class="form-row">
-                            <div class="form-field">
-                                <label>Claude Code Model</label>
-                                <input id="s-claude-code-model" value="claude-opus-4-6[1m]" placeholder="sonnet, opus, claude-opus-4-6[1m], or full name">
-                                <div class="settings-inline-note">Anthropic model for <code>claude_code_edit</code> and <code>advisory_pre_review</code> tools. Requires Anthropic key in Providers.</div>
-                            </div>
                         </div>
                     </div>
 

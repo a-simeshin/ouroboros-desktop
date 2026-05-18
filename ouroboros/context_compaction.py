@@ -112,7 +112,6 @@ def _compact_tool_call_arguments(tool_name: str, args_json: str) -> Dict[str, An
         "repo_write": "content",
         "repo_write_commit": "content",
         "data_write": "content",
-        "claude_code_edit": "prompt",
         "update_scratchpad": "content",
         "update_identity": "content",
     }

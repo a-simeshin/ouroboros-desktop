@@ -343,53 +343,6 @@ def _restart_current_process(host: str, port: int) -> None:
     _restart_current_process_impl(host, port, repo_dir=REPO_DIR, log=log)
 
 
-def _claude_code_status_payload() -> Dict[str, Any]:
-    """Return Claude runtime status using the app-managed runtime contract.
-
-    Replaces the old SDK-only installed/missing check with a richer
-    payload that reports: runtime source, interpreter path, SDK version,
-    CLI path/version, app-managed vs legacy state, API key readiness,
-    and the most recent stderr output on failure.
-    """
-    from ouroboros.platform_layer import resolve_claude_runtime
-
-    rt = resolve_claude_runtime()
-    label = rt.status_label()
-
-    stderr_tail = ""
-    try:
-        from ouroboros.gateways.claude_code import get_last_stderr as gw_stderr
-        stderr_tail = gw_stderr(max_chars=2000)
-    except Exception:
-        pass
-
-    message_map = {
-        "ready": f"Claude runtime ready (SDK {rt.sdk_version}, CLI {rt.cli_version})",
-        "no_api_key": f"Claude runtime available (SDK {rt.sdk_version}) but ANTHROPIC_API_KEY is not set. Add it in Settings.",
-        "error": f"Claude runtime error: {rt.error}",
-        "degraded": f"Claude runtime degraded (SDK {rt.sdk_version}, CLI {'found' if rt.cli_path else 'missing'}). Try Repair.",
-        "missing": "Claude runtime not available. Use Repair in Settings or reinstall the app.",
-    }
-
-    return {
-        "status": label,
-        "installed": bool(rt.sdk_version),
-        "ready": rt.ready,
-        "busy": False,
-        "version": rt.sdk_version,
-        "cli_version": rt.cli_version,
-        "cli_path": rt.cli_path,
-        "interpreter_path": rt.interpreter_path,
-        "app_managed": rt.app_managed,
-        "legacy_detected": rt.legacy_detected,
-        "legacy_sdk_version": rt.legacy_sdk_version,
-        "api_key_set": rt.api_key_set,
-        "message": message_map.get(label, f"Claude runtime: {label}"),
-        "error": rt.error,
-        "stderr_tail": stderr_tail,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Settings (single source of truth: ouroboros.config)
 # ---------------------------------------------------------------------------
@@ -1182,80 +1135,6 @@ async def api_onboarding(request: Request) -> Response:
     return HTMLResponse(build_onboarding_html(settings, host_mode="web"))
 
 
-async def api_claude_code_status(request: Request) -> JSONResponse:
-    try:
-        payload = await asyncio.to_thread(_claude_code_status_payload)
-        return JSONResponse(payload)
-    except Exception as e:
-        return JSONResponse({
-            "status": "error",
-            "installed": False,
-            "busy": False,
-            "message": "Failed to read Claude Agent SDK status.",
-            "error": str(e),
-        }, status_code=500)
-
-
-async def api_claude_code_install(request: Request) -> JSONResponse:
-    """Repair/update the app-managed Claude runtime.
-
-    Replaces the old "pip install SDK" endpoint. Now operates on the
-    app-managed interpreter (prefers embedded python-standalone) and
-    always reinstalls/upgrades to the pinned baseline version.
-    """
-    try:
-        import subprocess as _sp
-        import sys as _sys
-
-        interpreter = _sys.executable
-        try:
-            from ouroboros.platform_layer import resolve_claude_runtime
-            rt = resolve_claude_runtime()
-            if rt.interpreter_path:
-                interpreter = rt.interpreter_path
-        except Exception:
-            pass
-
-        # Single source of truth for the SDK baseline — mirrors the launcher
-        # bootstrap probe so web/onboarding repair installs the same version
-        # that the launcher repair path installs. Imported at call time (rather
-        # than at module load) so the error raises a clean 500 from the install
-        # endpoint instead of breaking server startup; but NO defaulted literal
-        # fallback is kept — that would reintroduce the drift this SSOT was
-        # meant to eliminate (one edit to `_CLAUDE_SDK_BASELINE` and one here
-        # would diverge silently). If the import truly fails, the runtime is
-        # already unusable and the caller should see the error.
-        from ouroboros.claude_runtime import _CLAUDE_SDK_BASELINE as sdk_baseline
-
-        result = await asyncio.to_thread(
-            lambda: _sp.run(
-                [interpreter, "-m", "pip", "install", "--upgrade", sdk_baseline],
-                capture_output=True, text=True, timeout=120,
-            )
-        )
-        if result.returncode == 0:
-            payload = await asyncio.to_thread(_claude_code_status_payload)
-            payload["repaired"] = True
-            return JSONResponse(payload)
-        return JSONResponse({
-            "status": "error",
-            "installed": False,
-            "ready": False,
-            "busy": False,
-            "message": "Claude runtime repair failed.",
-            "error": (result.stderr or result.stdout or "")[:500],
-        }, status_code=500)
-    except Exception as e:
-        return JSONResponse({
-            "status": "error",
-            "installed": False,
-            "ready": False,
-            "busy": False,
-            "message": "Claude runtime repair failed.",
-            "error": f"{type(e).__name__}: {e}",
-        }, status_code=500)
-
-
 async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -1919,8 +1798,6 @@ routes = [
     ),
     *file_browser_routes(),
     Route("/api/onboarding", endpoint=api_onboarding),
-    Route("/api/claude-code/status", endpoint=api_claude_code_status),
-    Route("/api/claude-code/install", endpoint=api_claude_code_install, methods=["POST"]),
     Route("/api/settings", endpoint=api_settings_get, methods=["GET"]),
     Route("/api/settings", endpoint=api_settings_post, methods=["POST"]),
     Route("/api/model-catalog", endpoint=api_model_catalog),
