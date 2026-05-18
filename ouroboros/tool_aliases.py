@@ -13,8 +13,6 @@ from typing import Any, Dict
 
 
 OPENCLAW_TOOL_ALIASES: dict[str, str] = {
-    "web_fetch": "browse_page",
-    "fetch": "browse_page",
     "exec": "run_shell",
     "bash": "run_shell",
     "shell": "run_shell",
@@ -44,13 +42,6 @@ def adapt_tool_args(name: str, args: Dict[str, Any] | None) -> Dict[str, Any]:
 
     canonical = canonical_tool_name(name)
     out: Dict[str, Any] = dict(args or {})
-
-    if canonical == "browse_page":
-        if "uri" in out and "url" not in out:
-            out["url"] = out.pop("uri")
-        # OpenClaw's web_fetch is normally "fetch readable text".
-        if str(name or "").strip() in {"web_fetch", "fetch"} and not out.get("output"):
-            out["output"] = "text"
 
     if canonical == "run_shell":
         if "command" in out and "cmd" not in out:

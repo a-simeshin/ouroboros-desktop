@@ -47,7 +47,6 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     # Web
     "web_search",
-    "browse_page", "browser_action", "analyze_screenshot",
     # Communication
     "send_user_message", "send_photo",
     # Control
@@ -78,14 +77,6 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "data_read", "data_list",
     "code_search",
     "web_search", "codebase_digest", "chat_history",
-})
-
-# ---------------------------------------------------------------------------
-# Stateful browser tools — require thread-sticky executor
-# ---------------------------------------------------------------------------
-
-STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
-    "browse_page", "browser_action",
 })
 
 # ---------------------------------------------------------------------------

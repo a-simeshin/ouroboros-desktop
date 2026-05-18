@@ -62,3 +62,9 @@ repo_bundle_manifest.json
 /jsonschema/
 /jsonschema_specifications/
 /certifi/
+openspec/specs/*/.research/
+openspec/specs/*/.research-notes.md
+openspec/changes/*/.research/
+openspec/changes/*/.research-notes.md
+openspec/changes/archive/*/.research/
+openspec/changes/archive/*/.research-notes.md

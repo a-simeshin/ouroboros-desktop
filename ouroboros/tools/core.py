@@ -430,11 +430,8 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
             return f"⚠️ Failed to read image file: {e}"
     elif image_base64:
         if image_base64 == "__last_screenshot__":
-            if not ctx.browser_state.last_screenshot_b64:
-                return "⚠️ No screenshot stored. Take one first with browse_page(output='screenshot')."
-            actual_b64 = ctx.browser_state.last_screenshot_b64
-        else:
-            actual_b64 = image_base64
+            return "⚠️ Screenshot capture is no longer supported. Provide file_path or raw base64 image data."
+        actual_b64 = image_base64
     else:
         return "⚠️ Provide either file_path or image_base64."
 
@@ -851,12 +848,11 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "Send an image to the owner's chat. "
                 "Preferred: use file_path to send a local file. "
-                "Legacy: use image_base64 with raw base64 or __last_screenshot__. "
-                "Use after browse_page(output='screenshot') or browser_action(action='screenshot')."
+                "Alternative: use image_base64 with raw base64 image data."
             ),
             "parameters": {"type": "object", "properties": {
                 "file_path": {"type": "string", "description": "Local file path to image (preferred)"},
-                "image_base64": {"type": "string", "description": "Base64-encoded image data or __last_screenshot__"},
+                "image_base64": {"type": "string", "description": "Base64-encoded image data"},
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
         }, _send_photo),

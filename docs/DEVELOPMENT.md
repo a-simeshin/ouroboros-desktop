@@ -50,9 +50,9 @@ Rules in this file must not contradict BIBLE.md.
 
 | Entity Type | Purpose | Naming Pattern | Contains Business Logic? | Example |
 |-------------|---------|----------------|--------------------------|---------|
-| **Gateway** | Thin adapter to an external API. Wraps third-party SDK/HTTP calls into clean Python functions. | `{Platform}Gateway` | No. Pure I/O — translate calls in, translate responses out. | `BrowserGateway` |
+| **Gateway** | Thin adapter to an external API. Wraps third-party SDK/HTTP calls into clean Python functions. | `{Platform}Gateway` | No. Pure I/O — translate calls in, translate responses out. | `GitHubGateway` |
 | **Service** | Orchestrates a domain concern. May use one or more Gateways, manage state, apply business rules. | `{Domain}Service` | Yes. Coordinates, decides, transforms. | — |
-| **Tool** | An LLM-callable function exposed to the agent. Thin wrapper that connects the agent to a Gateway or Service. | `{verb}_{noun}` (snake_case function) | Minimal. Validates input, calls Gateway/Service, formats output. | `repo_read`, `browse_page`, `web_search` |
+| **Tool** | An LLM-callable function exposed to the agent. Thin wrapper that connects the agent to a Gateway or Service. | `{verb}_{noun}` (snake_case function) | Minimal. Validates input, calls Gateway/Service, formats output. | `repo_read`, `code_search`, `web_search` |
 
 ### Gateway Rules (recommended pattern, not enforced)
 
@@ -74,7 +74,7 @@ When a Gateway exists, it should follow these guidelines:
 ```
 LLM Agent
     |  calls
-Tool (repo_read, web_search, browse_page)
+Tool (repo_read, web_search, code_search)
     |  delegates to
 Gateway or direct implementation
     |  calls
@@ -466,17 +466,15 @@ Rules for widget changes:
 ### Pytest marker lanes
 
 Default local pytest excludes costly or environment-dependent lanes:
-`integration`, `browser`, `ui_browser`, `ui_browser_docker`, and
-`portable_detail`. CI opts into them explicitly:
+`integration`, `ui_browser`, and `ui_browser_docker`. CI opts into them
+explicitly:
 
 - `integration` runs real provider checks, including Cloud.ru when
   `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured.
-- `browser` launches real Playwright Chromium for agent browser tools.
-- `ui_browser` launches the host-side web UI under Playwright.
+- `ui_browser` launches the host-side web UI under Playwright (Playwright is
+  a test-only dependency; the runtime no longer ships browser tools).
 - `ui_browser_docker` talks to an `ouroboros-web:test` container and must
   skip cleanly when Docker is unavailable locally.
-- `portable_detail` covers build/portable artifact invariants and also runs
-  inside Docker in the manual/tag CI tier.
 
 When adding a new opt-in lane, register the marker in `pyproject.toml`, add
 a collect-only zero-test guard in CI, and keep the default local addopts

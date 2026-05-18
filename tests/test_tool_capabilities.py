@@ -36,7 +36,7 @@ def test_loop_execution_imports_from_capabilities():
     source = inspect.getsource(lte)
     assert "from ouroboros.tool_capabilities import" in source
     # Must NOT have local frozenset definitions for these sets
-    for name in ("READ_ONLY_PARALLEL_TOOLS", "STATEFUL_BROWSER_TOOLS",
+    for name in ("READ_ONLY_PARALLEL_TOOLS",
                  "_UNTRUNCATED_TOOL_RESULTS", "_UNTRUNCATED_REPO_READ_PATHS"):
         # Check there's no local `X = frozenset({` pattern
         pattern = rf'^{re.escape(name)}\s*[:=]\s*frozenset'
@@ -49,14 +49,13 @@ def test_capabilities_sets_are_frozensets():
     """All exported sets must be frozensets (immutable)."""
     from ouroboros.tool_capabilities import (
         CORE_TOOL_NAMES, META_TOOL_NAMES, READ_ONLY_PARALLEL_TOOLS,
-        STATEFUL_BROWSER_TOOLS, UNTRUNCATED_TOOL_RESULTS,
+        UNTRUNCATED_TOOL_RESULTS,
         UNTRUNCATED_REPO_READ_PATHS,
     )
     for name, obj in [
         ("CORE_TOOL_NAMES", CORE_TOOL_NAMES),
         ("META_TOOL_NAMES", META_TOOL_NAMES),
         ("READ_ONLY_PARALLEL_TOOLS", READ_ONLY_PARALLEL_TOOLS),
-        ("STATEFUL_BROWSER_TOOLS", STATEFUL_BROWSER_TOOLS),
         ("UNTRUNCATED_TOOL_RESULTS", UNTRUNCATED_TOOL_RESULTS),
         ("UNTRUNCATED_REPO_READ_PATHS", UNTRUNCATED_REPO_READ_PATHS),
     ]:

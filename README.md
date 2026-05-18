@@ -9,6 +9,7 @@
 >
 > - **🔱 [fork] K8s / headless-режим** — `WEBUI_ONLY` (отключает Telegram-мост, секцию настроек, шаги онбординга), `OUROBOROS_TOOLS_ENABLED` whitelist для `ToolRegistry`, generic `configure_remote_url(url, user, password)` для любого HTTPS git-сервера (GitHub/GitLab/Gitea/Bitbucket), bootstrap-pull + shutdown-push в `ouroboros/git_sync`, pytest `docker` marker + testcontainers integration-тесты, conftest fixture против `MagicMock`-leak'ов. Спека: [`specs/k8s-deployment-readiness.md`](specs/k8s-deployment-readiness.md).
 > - **🔱 [fork] Удалён desktop bundle pipeline** — снят PyInstaller / launcher / `.dmg`/`.exe`/`.tar.gz` / embedded python-build-standalone / `repo.bundle`. Поддерживаются ровно два пути запуска: `python server.py` (run-from-source) и `docker run ouroboros-web` (контейнер). Подробности — `docs/ARCHITECTURE.md`. Migration для бывших bundle-пользователей — раздел "Upgrade from desktop bundle" ниже. Спека: [`specs/remove-pyinstaller-launcher-pipeline.md`](specs/remove-pyinstaller-launcher-pipeline.md).
+> - **🔱 [fork] Удалена интеграция с Playwright** — из runtime-агента полностью убраны browser-инструменты (`browse_page`, `browser_action`), анализ скриншотов (`analyze_screenshot`, `vlm_query` — модуль `vision` снят целиком) и алиасы `web_fetch`/`fetch`; снята авто-установка Chromium в рантайме и runtime-зависимости `playwright`/`playwright-stealth` (остаются **только** как test/dev-extra для UI/E2E-тестов веб-UI). Мотивация — сокращение attack surface и headless/k8s-окружение; замены нет, агент теряет доступ к веб-контенту. Спека: [`openspec/specs/ouroboros/ouroboros.md`](openspec/specs/ouroboros/ouroboros.md) (раздел 4.6).
 > - **🔱 [fork] README** — почти полностью переписан, маркетинговый блок и desktop-инструкции upstream'а удалены.
 
 ---
@@ -71,8 +72,6 @@ python server.py --host 127.0.0.1 --port 9000
 ### Run with Docker
 
 Docker — для web UI / runtime, не для desktop bundle. Контейнер биндится к `0.0.0.0:8765` по умолчанию, и образ выставляет `OUROBOROS_FILE_BROWSER_DEFAULT=${APP_HOME}` так что у Files tab всегда есть явный network-safe root.
-
-> **Browser tools на Linux/Docker:** `Dockerfile` запускает `playwright install-deps chromium` (authoritative Playwright dependency resolver) + `playwright install chromium`, так что `browse_page` и `browser_action` работают из коробки. Для source-инсталла на Linux без Docker: `python3 -m playwright install-deps chromium` (требует sudo / доступ к distro packages).
 
 Сборка образа:
 

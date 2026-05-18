@@ -42,7 +42,6 @@ TOOL_MODULES = [
     "ouroboros.tools.shell",
     "ouroboros.tools.search",
     "ouroboros.tools.control",
-    "ouroboros.tools.browser",
     "ouroboros.tools.review",
     "ouroboros.tools.claude_advisory_review",
     "ouroboros.tools.scope_review",
@@ -100,7 +99,6 @@ EXPECTED_TOOLS = [
     "git_status", "git_diff",
     "pull_from_remote", "restore_to_head", "revert_commit", "rollback_to_target",
     "run_shell", "exec", "bash", "shell", "run_command", "claude_code_edit",
-    "browse_page", "web_fetch", "fetch", "browser_action",
     "web_search",
     "chat_history", "update_scratchpad", "update_identity",
     "set_tool_timeout", "request_restart", "promote_to_stable", "request_deep_self_review",
@@ -126,8 +124,6 @@ EXPECTED_TOOLS = [
     # Task decomposition
     "get_task_result", "wait_for_task",
     "generate_evolution_stats",
-    # VLM / Vision
-    "analyze_screenshot", "vlm_query",
     # Message routing
     "forward_to_worker",
     # Context management

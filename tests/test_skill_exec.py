@@ -582,8 +582,6 @@ def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("tool_name,args", [
     ("run_shell", {"cmd": ["python", "-c", "print('x')"]}),
-    ("browse_page", {"url": "http://127.0.0.1"}),
-    ("browser_action", {"action": "evaluate", "value": "fetch('/api/skills/x/toggle')"}),
     ("schedule_task", {"text": "enable skill"}),
     ("skill_exec", {"skill": "alpha", "script": "hello.py"}),
     ("repo_write", {"path": "x.txt", "content": "x"}),

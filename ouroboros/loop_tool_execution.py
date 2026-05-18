@@ -1,7 +1,7 @@
 """
 Tool execution machinery for the LLM loop.
 
-Handles single-tool execution, parallel dispatch, timeouts, browser thread-affinity,
+Handles single-tool execution, parallel dispatch, timeouts,
 result truncation, and progress/trace logging.
 Extracted from loop.py to keep the main loop orchestrator focused.
 """
@@ -24,7 +24,6 @@ from ouroboros.tool_aliases import adapt_tool_args, canonical_tool_name
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
     REVIEWED_MUTATIVE_TOOLS,
-    STATEFUL_BROWSER_TOOLS,
     TOOL_RESULT_LIMITS as _TOOL_RESULT_LIMITS,
     DEFAULT_TOOL_RESULT_LIMIT as _DEFAULT_TOOL_RESULT_LIMIT,
     UNTRUNCATED_TOOL_RESULTS as _UNTRUNCATED_TOOL_RESULTS,
@@ -246,14 +245,12 @@ def _execute_single_tool(
 
 
 class StatefulToolExecutor:
-    """
-    Thread-sticky executor for stateful tools (browser, etc).
+    """Thread-sticky single-worker executor with reset/shutdown.
 
-    Playwright sync API uses greenlet internally which has strict thread-affinity:
-    once a greenlet starts in a thread, all subsequent calls must happen in the same thread.
-    This executor ensures browse_page/browser_action always run in the same thread.
-
-    On timeout: we shutdown the executor and create a fresh one to reset state.
+    A generic helper that pins all submitted work to one worker thread and
+    supports tearing the worker down and recreating it after a timeout/error.
+    Used by the background consciousness loop to run tools off the main
+    thread while keeping the ability to reset on a hung call.
     """
     def __init__(self):
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -328,14 +325,12 @@ def _execute_with_timeout(
     drive_logs: pathlib.Path,
     timeout_sec: int,
     task_id: str = "",
-    stateful_executor: Optional[StatefulToolExecutor] = None,
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout."""
     requested_fn_name = tc["function"]["name"]
     fn_name = canonical_tool_name(requested_fn_name)
     tool_call_id = tc["id"]
     is_code_tool = fn_name in tools.CODE_TOOLS
-    use_stateful = stateful_executor and fn_name in STATEFUL_BROWSER_TOOLS
     started_at = time.perf_counter()
     args_for_log = {}
     try:
@@ -354,8 +349,9 @@ def _execute_with_timeout(
         "args": args_for_log,
     })
 
-    if use_stateful:
-        future = stateful_executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
         try:
             result = future.result(timeout=timeout_sec)
             result_meta = result.get("result_meta") or {}
@@ -375,143 +371,90 @@ def _execute_with_timeout(
             })
             return result
         except (TimeoutError, concurrent.futures.TimeoutError):
-            stateful_executor.reset()
-            reset_msg = "Browser state has been reset. "
-            timeout_result = _make_timeout_result(
-                fn_name, tool_call_id, is_code_tool, tc, drive_logs,
-                timeout_sec, task_id, reset_msg
-            )
-            _emit_live_log(tools, {
-                "type": "tool_call_timeout",
-                "task_id": task_id,
-                "tool": fn_name,
-                "args": args_for_log,
-                "duration_sec": round(time.perf_counter() - started_at, 3),
-                "timeout_sec": timeout_sec,
-            })
-            return timeout_result
-    else:
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
-            try:
-                result = future.result(timeout=timeout_sec)
-                result_meta = result.get("result_meta") or {}
+            is_reviewed_mutative = fn_name in REVIEWED_MUTATIVE_TOOLS
+
+            if is_reviewed_mutative:
+                # Reviewed mutative tools must not end with an ambiguous
+                # timeout — emit a progress event and keep waiting.
+                try:
+                    from ouroboros.tools.commit_gate import _mark_review_attempt_late
+                    ctx = getattr(tools, "_ctx", None)
+                    if ctx is not None:
+                        _mark_review_attempt_late(
+                            ctx,
+                            soft_timeout_sec=timeout_sec,
+                            duration_sec=round(time.perf_counter() - started_at, 1),
+                        )
+                except Exception:
+                    log.debug("Failed to mark reviewed attempt as late_result_pending", exc_info=True)
                 _emit_live_log(tools, {
-                    "type": "tool_call_finished",
+                    "type": "tool_call_late",
                     "task_id": task_id,
                     "tool": fn_name,
-                    "args": result.get("args_for_log", args_for_log),
-                    "duration_sec": round(time.perf_counter() - started_at, 3),
-                    "is_error": bool(result.get("is_error")),
-                    "status": result_meta.get("status"),
-                    "exit_code": result_meta.get("exit_code"),
-                    "signal": result_meta.get("signal"),
-                    "result_preview": sanitize_tool_result_for_log(
-                        truncate_for_log(result.get("result", ""), 500)
+                    "args": args_for_log,
+                    "soft_timeout_sec": timeout_sec,
+                    "message": (
+                        f"Reviewed mutative tool '{fn_name}' exceeded "
+                        f"{timeout_sec}s — still waiting for result "
+                        f"(hard ceiling: {_REVIEWED_MUTATIVE_HARD_CEILING}s)"
                     ),
                 })
-                return result
-            except (TimeoutError, concurrent.futures.TimeoutError):
-                is_reviewed_mutative = fn_name in REVIEWED_MUTATIVE_TOOLS
-
-                if is_reviewed_mutative:
-                    # Reviewed mutative tools must not end with an ambiguous
-                    # timeout — emit a progress event and keep waiting.
-                    try:
-                        from ouroboros.tools.commit_gate import _mark_review_attempt_late
-                        ctx = getattr(tools, "_ctx", None)
-                        if ctx is not None:
-                            _mark_review_attempt_late(
-                                ctx,
-                                soft_timeout_sec=timeout_sec,
-                                duration_sec=round(time.perf_counter() - started_at, 1),
-                            )
-                    except Exception:
-                        log.debug("Failed to mark reviewed attempt as late_result_pending", exc_info=True)
+                try:
+                    ceiling = max(_REVIEWED_MUTATIVE_HARD_CEILING, timeout_sec + 60)
+                    remaining = max(1, ceiling - timeout_sec)
+                    result = future.result(timeout=remaining)
+                    result_meta = result.get("result_meta") or {}
                     _emit_live_log(tools, {
-                        "type": "tool_call_late",
+                        "type": "tool_call_finished",
                         "task_id": task_id,
                         "tool": fn_name,
-                        "args": args_for_log,
-                        "soft_timeout_sec": timeout_sec,
-                        "message": (
-                            f"Reviewed mutative tool '{fn_name}' exceeded "
-                            f"{timeout_sec}s — still waiting for result "
-                            f"(hard ceiling: {_REVIEWED_MUTATIVE_HARD_CEILING}s)"
-                        ),
+                        "args": result.get("args_for_log", args_for_log),
+                        "duration_sec": round(time.perf_counter() - started_at, 3),
+                        "is_error": bool(result.get("is_error")),
+                        "status": result_meta.get("status"),
+                        "late": True,
                     })
+                    return result
+                except (TimeoutError, concurrent.futures.TimeoutError):
+                    # True hard ceiling — genuine infrastructure failure.
+                    # Record terminal state so durable state never stays at 'reviewing'.
+                    # NOTE: Python threads cannot be cancelled, so the underlying
+                    # operation may still complete in the background. If it does, the
+                    # git.py _record_commit_attempt call will overwrite this state with
+                    # the actual outcome (succeeded/blocked/failed) — which is correct.
                     try:
-                        ceiling = max(_REVIEWED_MUTATIVE_HARD_CEILING, timeout_sec + 60)
-                        remaining = max(1, ceiling - timeout_sec)
-                        result = future.result(timeout=remaining)
-                        result_meta = result.get("result_meta") or {}
-                        _emit_live_log(tools, {
-                            "type": "tool_call_finished",
-                            "task_id": task_id,
-                            "tool": fn_name,
-                            "args": result.get("args_for_log", args_for_log),
-                            "duration_sec": round(time.perf_counter() - started_at, 3),
-                            "is_error": bool(result.get("is_error")),
-                            "status": result_meta.get("status"),
-                            "late": True,
-                        })
-                        return result
-                    except (TimeoutError, concurrent.futures.TimeoutError):
-                        # True hard ceiling — genuine infrastructure failure.
-                        # Record terminal state so durable state never stays at 'reviewing'.
-                        # NOTE: Python threads cannot be cancelled, so the underlying
-                        # operation may still complete in the background. If it does, the
-                        # git.py _record_commit_attempt call will overwrite this state with
-                        # the actual outcome (succeeded/blocked/failed) — which is correct.
-                        try:
-                            from ouroboros.tools.commit_gate import _record_commit_attempt
-                            ctx = getattr(tools, "_ctx", None)
-                            if ctx is not None:
-                                _record_commit_attempt(
-                                    ctx,
-                                    commit_message=str(getattr(ctx, "_current_review_commit_message", "") or ""),
-                                    status="failed",
-                                    block_reason="infra_failure",
-                                    block_details=(
-                                        f"Hard ceiling timeout ({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
-                                        "The underlying operation may still complete later."
-                                    ),
-                                    duration_sec=round(time.perf_counter() - started_at, 1),
-                                    late_result_pending=True,
-                                    phase="late_hard_ceiling",
-                                    readiness_warnings=[
-                                        "Reviewed mutative tool exceeded the hard ceiling; late result may still arrive."
-                                    ],
-                                    degraded_reasons=[
-                                        f"hard_ceiling_timeout:{_REVIEWED_MUTATIVE_HARD_CEILING}"
-                                    ],
-                                )
-                        except Exception:
-                            pass
-                        timeout_result = _make_timeout_result(
-                            fn_name, tool_call_id, is_code_tool, tc, drive_logs,
-                            _REVIEWED_MUTATIVE_HARD_CEILING, task_id,
-                            reset_msg=(
-                                f"CRITICAL: Reviewed mutative tool hit hard ceiling "
-                                f"({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
-                                "Check git state manually. "
-                            ),
-                        )
-                        _emit_live_log(tools, {
-                            "type": "tool_call_timeout",
-                            "task_id": task_id,
-                            "tool": fn_name,
-                            "args": args_for_log,
-                            "duration_sec": round(time.perf_counter() - started_at, 3),
-                            "timeout_sec": _REVIEWED_MUTATIVE_HARD_CEILING,
-                            "hard_ceiling": True,
-                        })
-                        return timeout_result
-                else:
+                        from ouroboros.tools.commit_gate import _record_commit_attempt
+                        ctx = getattr(tools, "_ctx", None)
+                        if ctx is not None:
+                            _record_commit_attempt(
+                                ctx,
+                                commit_message=str(getattr(ctx, "_current_review_commit_message", "") or ""),
+                                status="failed",
+                                block_reason="infra_failure",
+                                block_details=(
+                                    f"Hard ceiling timeout ({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
+                                    "The underlying operation may still complete later."
+                                ),
+                                duration_sec=round(time.perf_counter() - started_at, 1),
+                                late_result_pending=True,
+                                phase="late_hard_ceiling",
+                                readiness_warnings=[
+                                    "Reviewed mutative tool exceeded the hard ceiling; late result may still arrive."
+                                ],
+                                degraded_reasons=[
+                                    f"hard_ceiling_timeout:{_REVIEWED_MUTATIVE_HARD_CEILING}"
+                                ],
+                            )
+                    except Exception:
+                        pass
                     timeout_result = _make_timeout_result(
                         fn_name, tool_call_id, is_code_tool, tc, drive_logs,
-                        timeout_sec, task_id, reset_msg=""
+                        _REVIEWED_MUTATIVE_HARD_CEILING, task_id,
+                        reset_msg=(
+                            f"CRITICAL: Reviewed mutative tool hit hard ceiling "
+                            f"({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
+                            "Check git state manually. "
+                        ),
                     )
                     _emit_live_log(tools, {
                         "type": "tool_call_timeout",
@@ -519,11 +462,26 @@ def _execute_with_timeout(
                         "tool": fn_name,
                         "args": args_for_log,
                         "duration_sec": round(time.perf_counter() - started_at, 3),
-                        "timeout_sec": timeout_sec,
+                        "timeout_sec": _REVIEWED_MUTATIVE_HARD_CEILING,
+                        "hard_ceiling": True,
                     })
                     return timeout_result
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                timeout_result = _make_timeout_result(
+                    fn_name, tool_call_id, is_code_tool, tc, drive_logs,
+                    timeout_sec, task_id, reset_msg=""
+                )
+                _emit_live_log(tools, {
+                    "type": "tool_call_timeout",
+                    "task_id": task_id,
+                    "tool": fn_name,
+                    "args": args_for_log,
+                    "duration_sec": round(time.perf_counter() - started_at, 3),
+                    "timeout_sec": timeout_sec,
+                })
+                return timeout_result
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def handle_tool_calls(
@@ -531,7 +489,6 @@ def handle_tool_calls(
     tools: ToolRegistry,
     drive_logs: pathlib.Path,
     task_id: str,
-    stateful_executor: StatefulToolExecutor,
     messages: List[Dict[str, Any]],
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
@@ -552,8 +509,7 @@ def handle_tool_calls(
     if not can_parallel:
         results = [
             _execute_with_timeout(tools, tc, drive_logs,
-                                  _get_tool_timeout(tools, canonical_tool_name(tc["function"]["name"])), task_id,
-                                  stateful_executor)
+                                  _get_tool_timeout(tools, canonical_tool_name(tc["function"]["name"])), task_id)
             for tc in tool_calls
         ]
     else:
@@ -564,7 +520,6 @@ def handle_tool_calls(
                 executor.submit(
                     _execute_with_timeout, tools, tc, drive_logs,
                     _get_tool_timeout(tools, canonical_tool_name(tc["function"]["name"])), task_id,
-                    stateful_executor,
                 ): idx
                 for idx, tc in enumerate(tool_calls)
             }

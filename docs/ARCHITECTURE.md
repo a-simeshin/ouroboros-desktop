@@ -720,7 +720,6 @@ Single source of truth for all tool classification sets:
 - **`CORE_TOOL_NAMES`** — tools available from round 1 (no `enable_tools` needed)
 - **`META_TOOL_NAMES`** — discovery tools (`list_available_tools`, `enable_tools`)
 - **`READ_ONLY_PARALLEL_TOOLS`** — safe for concurrent execution in ThreadPoolExecutor
-- **`STATEFUL_BROWSER_TOOLS`** — require thread-sticky executor (Playwright affinity)
 - **`REVIEWED_MUTATIVE_TOOLS`** — tools (`repo_commit`, `repo_write_commit`) that must NOT
   end with ambiguous timeouts; executor waits synchronously for the final result
 - **`UNTRUNCATED_TOOL_RESULTS`** — tools whose output must never be truncated
@@ -744,10 +743,9 @@ runtime authority.
 - **`tool_discovery.py`**: Provides `list_available_tools` (discover non-core tools) and `enable_tools` (activate extra tools for the current task). Enables dynamic tool set management.
 - **`code_search`**: First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
-- OpenClaw-compatible tool aliases live in `ouroboros/tool_aliases.py` as a boundary layer only. Aliases such as `web_fetch`, `exec`, `read_file`, `write_file`, and `edit` are exposed as cloned schemas but normalize to canonical tools (`browse_page`, `run_shell`, `repo_read`, `repo_write`, `str_replace_editor`) before parallel classification, timeout lookup, safety policy, dispatch, and result truncation. They are not separate registry identities.
+- OpenClaw-compatible tool aliases live in `ouroboros/tool_aliases.py` as a boundary layer only. Aliases such as `exec`, `read_file`, `write_file`, and `edit` are exposed as cloned schemas but normalize to canonical tools (`run_shell`, `repo_read`, `repo_write`, `str_replace_editor`) before parallel classification, timeout lookup, safety policy, dispatch, and result truncation. They are not separate registry identities.
 - Read-only tools can run in parallel (ThreadPoolExecutor)
-- Browser tools use thread-sticky executor (Playwright greenlet affinity)
-- All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call. The actual timeout is `max(settings_value, per_tool_declared)` so tools declaring a higher minimum (e.g. `claude_code_edit` at 1200s) are never silently capped by a lower global default.
+- All tools have hard timeout (default 600s, per-tool overrides for search); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call. The actual timeout is `max(settings_value, per_tool_declared)` so tools declaring a higher minimum (e.g. `claude_code_edit` at 1200s) are never silently capped by a lower global default.
 - Layered safety: hardcoded sandbox (registry.py) → policy-based LLM safety check (safety.py `TOOL_POLICY`, single light-model call; unknown tools fall through to `DEFAULT_POLICY = check`)
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping. `data_read` returns `DATA_NOT_YET_CREATED` only for genuine `FileNotFoundError`; permission, directory, and other I/O errors still propagate so missing-state recovery does not hide real filesystem faults.
 - `repo_read` gives a friendly memory-artifact hint for bare `identity.md` / `scratchpad.md`-style paths only after the repo-root file is actually missing. A real repo file with the same name wins and is read normally.
@@ -1705,7 +1703,7 @@ GitHub Actions tiers (no desktop bundle build — there is no PyInstaller releas
 | Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
 | Integration | Push to `main`, `ouroboros`, or `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Ubuntu-only: `pytest tests/test_provider_integration.py -m integration` against real OpenRouter / OpenAI / Anthropic / Cloud.ru keys (skipped per-provider when its key is unset) | ~2 min |
-| UI smoke | Manual (`workflow_dispatch`) or tag `v*` | Host-side Playwright UI smoke plus real Chromium browser-tool smoke (`browser`, `ui_browser`) with collect-only marker guards | ~5 min |
+| UI smoke | Manual (`workflow_dispatch`) or tag `v*` | Host-side Playwright UI smoke (`ui_browser`) with collect-only marker guards | ~5 min |
 | Docker smoke | Manual (`workflow_dispatch`) or tag `v*` | Build `ouroboros-web:test`, run UI smoke against the container | ~10 min |
 
 Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
@@ -1729,16 +1727,15 @@ default with `pytest -o addopts='' tests/test_provider_integration.py::test_X`.
 ### Docker (`Dockerfile`)
 
 ```
-python:3.10-slim + git → pip install requirements → playwright install-deps chromium → playwright install chromium → python server.py
+python:3.10-slim + git → pip install requirements → python server.py
 Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
 ```
 
-From v4.40.2, the `Dockerfile` installs all native system dependencies via
-`python3 -m playwright install-deps chromium` (the authoritative Playwright-managed
-dependency resolver, not a hand-curated apt list) **and** the Chromium browser binary
-itself (`PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium`) so browser
-tools (`browse_page`, `browser_action`) work out of the box in the container without any
-additional setup or first-run download.
+The runtime image installs only Python runtime dependencies. The Playwright
+browser-automation tools were removed, so the image no longer installs
+Chromium or its native system libraries. Playwright remains a test-only
+dependency, installed on the CI runner (not in the runtime image) to drive
+the retained UI/E2E smoke tests.
 
 ---
 
@@ -1907,8 +1904,8 @@ via `tests/test_contracts.py`.
 
 ### 11.2 What is NOT frozen (intentionally)
 
-- The full `ToolContext` dataclass (browser state, review history, model
-  overrides, …) remains mutable implementation detail.
+- The full `ToolContext` dataclass (review history, model overrides, …)
+  remains mutable implementation detail.
 - `OUROBOROS_SCHEMA_VERSION` of `state.json` / `queue_snapshot.json` /
   `task_results/*.json` is treated as `0` (legacy) until Phase 2+ wires the
   helpers in.

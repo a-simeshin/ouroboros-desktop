@@ -23,7 +23,6 @@ from ouroboros.context_compaction import compact_tool_history_llm
 from ouroboros.utils import estimate_tokens
 
 from ouroboros.loop_tool_execution import (
-    StatefulToolExecutor,
     handle_tool_calls,
     _truncate_tool_result,
     _TOOL_RESULT_LIMITS,
@@ -537,7 +536,6 @@ def run_llm_loop(
     tools._ctx.event_queue = event_queue
     tools._ctx.task_id = task_id
     tools._ctx.messages = messages
-    stateful_executor = StatefulToolExecutor()
     _owner_msg_seen: set = set()
     try:
         MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
@@ -700,7 +698,7 @@ def run_llm_loop(
                 llm_trace["reasoning_notes"].append(content.strip())
 
             error_count = handle_tool_calls(
-                tool_calls, tools, drive_logs, task_id, stateful_executor,
+                tool_calls, tools, drive_logs, task_id,
                 messages, llm_trace, emit_progress
             )
 
@@ -713,16 +711,6 @@ def run_llm_loop(
                 return budget_result
 
     finally:
-        if stateful_executor:
-            try:
-                from ouroboros.tools.browser import cleanup_browser
-                stateful_executor.submit(cleanup_browser, tools._ctx).result(timeout=5)
-            except Exception:
-                log.debug("Browser cleanup on executor thread failed or timed out", exc_info=True)
-            try:
-                stateful_executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                log.warning("Failed to shutdown stateful executor", exc_info=True)
         if drive_root is not None and task_id:
             try:
                 from ouroboros.owner_inject import cleanup_task_mailbox

@@ -432,16 +432,6 @@ def _extract_git_subcommand(cmd_parts: list) -> str:
 
 
 @dataclass
-class BrowserState:
-    """Per-task browser lifecycle state (Playwright). Isolated from generic ToolContext."""
-
-    pw_instance: Any = None
-    browser: Any = None
-    page: Any = None
-    last_screenshot_b64: Optional[str] = None
-
-
-@dataclass
 class ToolContext:
     """Tool execution context — passed from the agent before each task."""
 
@@ -459,9 +449,6 @@ class ToolContext:
     active_model_override: Optional[str] = None
     active_effort_override: Optional[str] = None
     active_use_local_override: Optional[bool] = None
-
-    # Per-task browser state
-    browser_state: BrowserState = field(default_factory=BrowserState)
 
     # Budget tracking (set by loop.py for real-time usage events)
     event_queue: Optional[Any] = None
@@ -526,7 +513,6 @@ CORE_TOOL_NAMES = {
     "send_user_message", "switch_model",
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write", "knowledge_list",
-    "browse_page", "browser_action", "analyze_screenshot",
     # v5.7.0: keep this frozen fallback copy aligned with
     # tool_capabilities.CORE_TOOL_NAMES. ToolPolicy is the runtime SSOT, but
     # some schemas(core_only=True) callers still use this local set.
@@ -573,7 +559,7 @@ class ToolRegistry:
         )
 
     _FROZEN_TOOL_MODULES = [
-        "a2a", "browser", "ci", "claude_advisory_review", "compact_context", "control",
+        "a2a", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
         "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
         # Phase 3 three-layer refactor: external skill surface
@@ -581,7 +567,7 @@ class ToolRegistry:
         "skill_exec",
         # v5.7.0: skill_preflight — read-only payload validator for heal mode.
         "skill_preflight",
-        "tool_discovery", "vision",
+        "tool_discovery",
     ]
 
     def _load_modules(self) -> None:
@@ -1259,7 +1245,7 @@ class ToolRegistry:
             if ext_tool or name not in _HEAL_MODE_ALLOWED_TOOLS:
                 return (
                     "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
-                    "payloads and run review_skill only. Shell, browser automation, "
+                    "payloads and run review_skill only. Shell, "
                     "repo mutation, skill execution, extension tools, delegation, "
                     "and enable/disable flows are unavailable. Use the Skills UI "
                     "after a fresh PASS review."

@@ -8,10 +8,9 @@ import pytest
 from ouroboros.tools.core import _send_photo, _detect_image_mime, _MAX_PHOTO_FILE_BYTES
 
 
-def _make_ctx(chat_id=123, screenshot_b64=None):
+def _make_ctx(chat_id=123):
     return types.SimpleNamespace(
         current_chat_id=chat_id,
-        browser_state=types.SimpleNamespace(last_screenshot_b64=screenshot_b64),
         pending_events=[],
     )
 
@@ -56,16 +55,13 @@ class TestSendPhotoBase64Fallback:
         assert "OK" in result
         assert len(ctx.pending_events) == 1
 
-    def test_last_screenshot_reference(self):
-        b64 = base64.b64encode(b'\x00' * 200).decode()
-        ctx = _make_ctx(screenshot_b64=b64)
+    def test_last_screenshot_no_longer_supported(self):
+        # Screenshot capture was removed with the Playwright browser tools;
+        # the legacy __last_screenshot__ sentinel must be rejected cleanly.
+        ctx = _make_ctx()
         result = _send_photo(ctx, image_base64="__last_screenshot__")
-        assert "OK" in result
-
-    def test_last_screenshot_missing(self):
-        ctx = _make_ctx(screenshot_b64=None)
-        result = _send_photo(ctx, image_base64="__last_screenshot__")
-        assert "No screenshot" in result
+        assert "no longer supported" in result.lower()
+        assert len(ctx.pending_events) == 0
 
 
 class TestDetectImageMime:

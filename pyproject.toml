@@ -57,10 +57,12 @@ Issues = "https://github.com/joi-lab/ouroboros-desktop/issues"
 [project.optional-dependencies]
 claude-sdk = ["claude-agent-sdk>=0.1.60"]
 a2a = ["a2a-sdk[http-server]>=0.3.20,<1.0.0"]
-browser = ["playwright", "playwright-stealth"]
 local-model = ["llama-cpp-python"]
-test = ["testcontainers>=4.0", "pytest-mock>=3.10", "requests"]
-all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20,<1.0.0", "playwright", "playwright-stealth", "llama-cpp-python", "huggingface_hub"]
+# ``playwright`` is a test-only dependency: it is no longer used at runtime
+# (browser automation tools were removed), only by the retained UI/E2E smoke
+# tests (test_ui_smoke_playwright.py, test_smoke_e2e_post_refactor.py).
+test = ["testcontainers>=4.0", "pytest-mock>=3.10", "requests", "playwright"]
+all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20,<1.0.0", "llama-cpp-python", "huggingface_hub"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -69,10 +71,9 @@ python_functions = ["test_*"]
 # Default local runs exclude the `integration` marker so contributors do not
 # accidentally burn provider tokens on every `pytest`. CI Tier 2.5 opts in
 # explicitly with `pytest -m integration` (the CLI -m overrides addopts -m).
-addopts = "-q --tb=short -m 'not integration and not browser and not ui_browser and not docker'"
+addopts = "-q --tb=short -m 'not integration and not ui_browser and not docker'"
 markers = [
     "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / CLOUDRU_FOUNDATION_MODELS_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
-    "browser: launches real Playwright Chromium; excluded from default local runs, opt in via `pytest -m browser`",
     "ui_browser: launches the real Ouroboros web UI in host/direct mode; excluded from default local runs",
     "docker: requires Docker daemon (Testcontainers integration tests)",
 ]

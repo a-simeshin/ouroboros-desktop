@@ -135,18 +135,14 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest
-      - name: Guard non-empty browser marker lanes
+          pip install pytest playwright
+      - name: Guard non-empty UI browser marker lanes
         run: |
           set -euo pipefail
-          python -m pytest tests/ --collect-only -m browser -q | tee /tmp/browser-collect.txt
           python -m pytest tests/ --collect-only -m ui_browser -q | tee /tmp/ui-collect.txt
           python -m pytest tests/ --collect-only -m ui_browser_docker -q | tee /tmp/ui-docker-collect.txt
-          python -m pytest tests/ --collect-only -m portable_detail -q | tee /tmp/portable-collect.txt
-          ! grep -q "no tests collected" /tmp/browser-collect.txt
           ! grep -q "no tests collected" /tmp/ui-collect.txt
           ! grep -q "no tests collected" /tmp/ui-docker-collect.txt
-          ! grep -q "no tests collected" /tmp/portable-collect.txt
 
   ui-smoke:
     if: |
@@ -168,8 +164,6 @@ jobs:
         env:
           OUROBOROS_RUN_UI_SMOKE: "1"
         run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser -q --tb=short
-      - name: Run browser tools Chromium smoke
-        run: python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
 
   docker-ui-smoke:
     if: |
@@ -193,18 +187,4 @@ jobs:
           OUROBOROS_RUN_DOCKER_UI_SMOKE: "1"
           OUROBOROS_DOCKER_UI_IMAGE: ouroboros-web:test
         run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser_docker -q --tb=short
-
-  docker-portable-test:
-    if: |
-      github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build Docker image
-        run: docker build -t ouroboros-web:test .
-      - name: Run portable detail tests in Docker
-        run: |
-          docker run --rm --entrypoint sh -e OUROBOROS_EXPECT_HEADLESS_SHELL=1 ouroboros-web:test -c \
-            "PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --only-shell chromium && python -m pytest tests/ -m portable_detail -q --tb=short"
 

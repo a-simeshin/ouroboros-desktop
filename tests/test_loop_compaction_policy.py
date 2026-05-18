@@ -128,7 +128,7 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
         return ({"role": "assistant", "content": "done", "tool_calls": []}, 0.0)
 
     def fake_handle_tool_calls(tool_calls, tools, drive_logs, task_id,
-                                stateful_executor, messages, llm_trace, emit_progress):
+                                messages, llm_trace, emit_progress):
         # Append a fake tool result so the message list grows
         for tc in tool_calls:
             messages.append({"role": "tool",

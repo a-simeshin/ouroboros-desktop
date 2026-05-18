@@ -407,12 +407,6 @@ class OuroborosAgent:
 
         finally:
             self._busy = False
-            try:
-                from ouroboros.tools.browser import cleanup_browser
-                cleanup_browser(self.tools._ctx)
-            except Exception:
-                log.debug("Failed to cleanup browser", exc_info=True)
-                pass
             while not self._incoming_messages.empty():
                 try:
                     self._incoming_messages.get_nowait()

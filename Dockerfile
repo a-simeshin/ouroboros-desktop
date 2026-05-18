@@ -5,7 +5,7 @@
 
 FROM python:3.10-slim
 
-# System dependencies (git + Playwright/Chromium native libs installed via playwright install-deps)
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -17,12 +17,6 @@ WORKDIR ${APP_HOME}
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install all Playwright native system dependencies for Chromium (authoritative list from Playwright)
-RUN python3 -m playwright install-deps chromium
-
-# Install Playwright Chromium browser binary so browser tools work out of the box
-RUN PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium
 
 # Copy application
 COPY . .
